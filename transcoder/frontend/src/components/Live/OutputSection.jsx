@@ -27,7 +27,7 @@ const PRESETS = [
 ]
 
 export default function LiveOutputSection({ value, onChange }) {
-  const set = (field, val) => onChange({ ...value, [field]: val })
+  const set = (field, val) => onChange(prev => ({ ...prev, [field]: val }))
   const isHLS = (value.output_type || 'HLS') === 'HLS'
   const isRTMP = value.output_type === 'RTMP'
   const dest = value.output_destination || 'LOCAL'
@@ -132,10 +132,10 @@ export default function LiveOutputSection({ value, onChange }) {
                 <TextField fullWidth size="small" label="Master Filename" value={value.master_filename || 'live'} onChange={(e) => set('master_filename', e.target.value)} helperText="Without .m3u8" />
               </Grid>
               <Grid item xs={12} md={2}>
-                <TextField fullWidth size="small" type="number" label="Segment Length (s)" value={value.segment_length || 4} onChange={(e) => set('segment_length', parseInt(e.target.value) || 4)} inputProps={{ min: 1, max: 30 }} />
+                <TextField fullWidth size="small" type="number" label="Segment Length (s)" value={value.segment_length ?? 4} onChange={(e) => set('segment_length', parseInt(e.target.value, 10) || 4)} inputProps={{ min: 1, max: 30 }} />
               </Grid>
               <Grid item xs={12} md={2}>
-                <TextField fullWidth size="small" type="number" label="Playlist Size" value={value.hls_list_size || 6} onChange={(e) => set('hls_list_size', parseInt(e.target.value) || 6)} helperText="Segments in window" inputProps={{ min: 1 }} />
+                <TextField fullWidth size="small" type="number" label="Playlist Size" value={value.hls_list_size ?? 6} onChange={(e) => set('hls_list_size', parseInt(e.target.value, 10) || 1)} helperText="Segments in window" inputProps={{ min: 1 }} />
               </Grid>
               <Grid item xs={12} md={5}>
                 <FormControl fullWidth size="small">

@@ -27,7 +27,7 @@ function ChannelRunningDialog({ open, channelId, playbackUrl, onClose, onStop })
   const copy = (text) => navigator.clipboard.writeText(text)
 
   return (
-    <Dialog open={open} maxWidth="sm" fullWidth>
+    <Dialog open={open} maxWidth="sm" fullWidth onClose={onClose}>
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
         <FiberManualRecordIcon color="error" sx={{ animation: 'pulse 1.5s infinite' }} />
         <Chip label="LIVE" color="error" size="small" sx={{ fontWeight: 700 }} />
@@ -195,7 +195,7 @@ export default function LiveTranscoder() {
           open={!!channelRunning}
           channelId={channelRunning.channelId}
           playbackUrl={channelRunning.playbackUrl}
-          onClose={() => {}}
+          onClose={() => setChannelRunning(null)}
           onStop={handleStop}
         />
       )}
