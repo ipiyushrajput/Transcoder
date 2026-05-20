@@ -1,0 +1,22 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/routes/__pycache__/
+backend/logs/
+backend/*.log
+backend/ffmpeg_*.log
+*.pyc
+*.pyo
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp dirs created during transcoding
+/tmp/vod_*/
+/tmp/live_*/
