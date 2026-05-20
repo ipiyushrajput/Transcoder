@@ -47,7 +47,7 @@ function JobStartedDialog({ open, jobId, playbackUrl, onClose, onStop }) {
   const copy = (text) => navigator.clipboard.writeText(text)
 
   return (
-    <Dialog open={open} maxWidth="sm" fullWidth>
+    <Dialog open={open} maxWidth="sm" fullWidth onClose={onClose}>
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
         <Chip label="RUNNING" color="success" size="small" />
         VOD Job Started

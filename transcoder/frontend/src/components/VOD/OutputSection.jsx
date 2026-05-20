@@ -46,7 +46,7 @@ const PRESETS = [
 ]
 
 export default function OutputSection({ value, onChange }) {
-  const set = (field, val) => onChange({ ...value, [field]: val })
+  const set = (field, val) => onChange(prev => ({ ...prev, [field]: val }))
 
   const isHLS = (value.output_type || 'HLS') === 'HLS'
   const isS3 = (value.output_destination || 'LOCAL') === 'S3'
@@ -137,7 +137,7 @@ export default function OutputSection({ value, onChange }) {
               <Grid item xs={12} md={2}>
                 <TextField
                   fullWidth size="small" type="number" label="Segment Length (s) *"
-                  value={value.segment_length || 6} onChange={(e) => set('segment_length', parseInt(e.target.value) || 6)}
+                  value={value.segment_length ?? 6} onChange={(e) => set('segment_length', parseInt(e.target.value, 10) || 6)}
                   inputProps={{ min: 1, max: 60 }}
                 />
               </Grid>

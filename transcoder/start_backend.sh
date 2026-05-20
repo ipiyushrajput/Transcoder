@@ -7,16 +7,30 @@ VENV="$BACKEND_DIR/.venv"
 
 cd "$BACKEND_DIR"
 
-# Create venv if not exists
-if [ ! -d "$VENV" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv "$VENV"
-    "$VENV/bin/pip" install -q -r requirements.txt
+# Detect Python executable
+if command -v python3 &>/dev/null; then
+    PYTHON="python3"
+elif command -v python &>/dev/null; then
+    PYTHON="python"
+else
+    echo "ERROR: Python not found. Install Python 3.10+ and try again."
+    exit 1
 fi
 
-# Check if already running
-if pgrep -f "app.py" > /dev/null; then
-    echo "Backend already running"
+# Create venv if not present
+if [ ! -d "$VENV" ]; then
+    echo "Creating virtual environment..."
+    "$PYTHON" -m venv "$VENV"
+fi
+
+# Always install / sync requirements
+echo "Installing requirements..."
+"$VENV/bin/python" -m pip install -q --upgrade pip
+"$VENV/bin/python" -m pip install -q -r requirements.txt
+
+# Guard against double-start
+if pgrep -f "app.py" > /dev/null 2>&1; then
+    echo "Backend already running."
     exit 0
 fi
 

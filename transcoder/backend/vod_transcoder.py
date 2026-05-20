@@ -303,9 +303,17 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
 
     logging.info(f"[VOD:{name}] Starting job {job_id}")
 
-    # Create temp working dir
+    # Create temp working dir (used for ffconcat manifests and log files)
     tmp_dir = tempfile.mkdtemp(prefix=f"vod_{job_id[:8]}_")
-    output_dir = os.path.join(tmp_dir, "output")
+
+    # When destination is LOCAL and a path is given, write directly there;
+    # otherwise use a sub-dir of tmp_dir (for S3 / other destinations).
+    dest = job_config.get("output_destination", "LOCAL").upper()
+    _local_path = job_config.get("local_path", "").strip()
+    if dest == "LOCAL" and _local_path:
+        output_dir = _local_path
+    else:
+        output_dir = os.path.join(tmp_dir, "output")
     os.makedirs(output_dir, exist_ok=True)
 
     input_url = job_config["input_url"]
@@ -371,7 +379,6 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
 
     # Start S3 watcher if destination is S3
     observer = handler = periodic = None
-    dest = job_config.get("output_destination", "LOCAL").upper()
     s3_client = None
     if dest == "S3":
         bucket = job_config.get("s3_bucket", "")
@@ -510,16 +517,7 @@ def _monitor_vod_process(job_id: str, db_update_callback=None):
             elif dest == "LOCAL":
                 local_path = job_config.get("local_path", "")
                 if local_path:
-                    try:
-                        os.makedirs(local_path, exist_ok=True)
-                        for item in os.listdir(output_dir):
-                            src = os.path.join(output_dir, item)
-                            dst = os.path.join(local_path, item)
-                            if os.path.isfile(src):
-                                shutil.copy2(src, dst)
-                        logging.info(f"[VOD:{name}] Files copied to {local_path}")
-                    except Exception as e:
-                        logging.error(f"[VOD:{name}] Local copy error: {e}")
+                    logging.info(f"[VOD:{name}] Output written directly to {local_path}")
         else:
             logging.error(f"[VOD:{name}] FFmpeg failed (rc={returncode})")
             status = "FAILED"

@@ -162,13 +162,20 @@ def start_live_channel(channel_config: dict, db_update_callback=None) -> dict:
     logging.info(f"[LIVE:{name}] Starting channel {channel_id}")
 
     tmp_dir = tempfile.mkdtemp(prefix=f"live_{channel_id[:8]}_")
-    output_dir = os.path.join(tmp_dir, "hls")
+
+    # When destination is LOCAL and a path is provided, write segments directly
+    # there; otherwise use a sub-dir of tmp_dir (for S3 / MediaPackage).
+    dest = channel_config.get("output_destination", "LOCAL").upper()
+    _local_path = channel_config.get("local_path", "").strip()
+    if dest == "LOCAL" and _local_path:
+        output_dir = _local_path
+    else:
+        output_dir = os.path.join(tmp_dir, "hls")
     os.makedirs(output_dir, exist_ok=True)
 
     input_url = channel_config["input_url"]
     input_type = channel_config.get("input_type", "HLS").upper()
     output_type = channel_config.get("output_type", "HLS").upper()
-    dest = channel_config.get("output_destination", "LOCAL").upper()
 
     segment_size = int(channel_config.get("segment_length", 4))
     master_filename = channel_config.get("master_filename", "live")
