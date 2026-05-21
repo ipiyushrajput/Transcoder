@@ -24,9 +24,11 @@ if [ ! -d "$VENV" ]; then
 fi
 
 # Always install / sync requirements
+# --trusted-host flags handle corporate proxies with SSL inspection
+PIP_TRUSTED="--trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org"
 echo "Installing requirements..."
-"$VENV/bin/python" -m pip install -q --upgrade pip
-"$VENV/bin/python" -m pip install -q -r requirements.txt
+"$VENV/bin/python" -m pip install -q --upgrade pip $PIP_TRUSTED
+"$VENV/bin/python" -m pip install -q -r requirements.txt $PIP_TRUSTED
 
 # Guard against double-start
 if pgrep -f "app.py" > /dev/null 2>&1; then
