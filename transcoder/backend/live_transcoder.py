@@ -102,7 +102,7 @@ def build_live_hls_command(
             f"-pix_fmt:v:{i}", "yuv420p",
             f"-c:a:{i}", audio_codec,
             f"-b:a:{i}", str(audio_bitrate),
-            f"-ar:v:{i}", str(sample_rate),
+            f"-ar:a:{i}", str(sample_rate),
         ])
 
     stream_map = " ".join(

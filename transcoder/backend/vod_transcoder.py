@@ -173,6 +173,8 @@ def build_vod_ffmpeg_command(
 
     if use_concat:
         cmd.extend(["-safe", "0"])
+        # Required when ffconcat entries reference http/https URLs
+        cmd.extend(["-protocol_whitelist", "file,http,https,tcp,tls,crypto"])
     cmd.extend(["-i", input_path])
     cmd.extend(["-filter_complex", filter_complex])
 
@@ -225,7 +227,7 @@ def build_vod_ffmpeg_command(
         cmd.extend([
             f"-c:a:{i}", audio_codec,
             f"-b:a:{i}", str(audio_bitrate),
-            f"-ar:v:{i}", str(sample_rate),
+            f"-ar:a:{i}", str(sample_rate),
         ])
 
     # var_stream_map
