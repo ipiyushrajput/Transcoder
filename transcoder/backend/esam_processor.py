@@ -195,8 +195,24 @@ def inject_markers_into_variant(m3u8_path: Path, events: list) -> int:
     return inserted
 
 
-def process_esam_on_output(output_dir: str, events: list) -> int:
-    """Process ESAM markers on all playlists in output_dir. Returns total markers injected."""
+def _find_subtitle_playlist_paths(lines, basepath: Path) -> list:
+    """Find subtitle playlist URIs from #EXT-X-MEDIA:TYPE=SUBTITLES tags."""
+    paths = []
+    for line in lines:
+        ln = line.strip()
+        if ln.startswith("#EXT-X-MEDIA:TYPE=SUBTITLES") or "TYPE=SUBTITLES" in ln:
+            # Extract URI="..." value
+            import re
+            m = re.search(r'URI="([^"]+)"', ln)
+            if m:
+                uri = m.group(1)
+                abs_path = (basepath / uri).resolve()
+                paths.append((uri, abs_path))
+    return paths
+
+
+def process_esam_on_output(output_dir: str, events: list, subtitle_playlist_path: str = None) -> int:
+    """Process ESAM markers on all variant playlists and optionally the subtitle playlist."""
     if not events:
         return 0
 
@@ -215,7 +231,7 @@ def process_esam_on_output(output_dir: str, events: list) -> int:
     if master:
         content = master.read_text(encoding="utf-8").splitlines(keepends=True)
         variants = _find_variant_paths(content, output_path)
-        logging.info(f"ESAM: processing {len(variants)} variant(s) from master {master.name}")
+        logging.info(f"ESAM: processing {len(variants)} video variant(s) from master {master.name}")
         for uri, abs_path in variants:
             if abs_path.exists():
                 cnt = inject_markers_into_variant(abs_path, events)
@@ -223,6 +239,14 @@ def process_esam_on_output(output_dir: str, events: list) -> int:
                 logging.info(f"  Injected {cnt} markers into {uri}")
             else:
                 logging.warning(f"  Variant not found: {abs_path}")
+
+        # Also inject into subtitle playlists referenced by #EXT-X-MEDIA
+        sub_paths = _find_subtitle_playlist_paths(content, output_path)
+        for uri, abs_path in sub_paths:
+            if abs_path.exists():
+                cnt = inject_markers_into_variant(abs_path, events)
+                total += cnt
+                logging.info(f"  Injected {cnt} ESAM markers into subtitle playlist {uri}")
     else:
         # No master found; process all non-master m3u8 files
         for m3u8 in master_candidates:
@@ -230,5 +254,19 @@ def process_esam_on_output(output_dir: str, events: list) -> int:
             if not _is_master_playlist(content):
                 cnt = inject_markers_into_variant(m3u8, events)
                 total += cnt
+
+    # Explicit subtitle playlist path (if not referenced in master yet)
+    if subtitle_playlist_path:
+        sub_path = Path(subtitle_playlist_path)
+        if sub_path.exists():
+            already_done = False
+            if master:
+                content = master.read_text(encoding="utf-8").splitlines(keepends=True)
+                done_paths = [p for _, p in _find_subtitle_playlist_paths(content, output_path)]
+                already_done = sub_path.resolve() in done_paths
+            if not already_done:
+                cnt = inject_markers_into_variant(sub_path, events)
+                total += cnt
+                logging.info(f"  Injected {cnt} ESAM markers into subtitle playlist {sub_path.name}")
 
     return total

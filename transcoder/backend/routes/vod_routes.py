@@ -79,7 +79,7 @@ def _save_job_to_db(job_config: dict, job_id: str, playback_url: str):
         close_db(db)
 
 
-def _update_job_status_in_db(job_id: str, status: str, pid: int = None):
+def _update_job_status_in_db(job_id: str, status: str, pid: int = None, error_message: str = None):
     db = get_db()
     if not db:
         return
@@ -91,6 +91,8 @@ def _update_job_status_in_db(job_id: str, status: str, pid: int = None):
                 job.process_pid = pid
             if status in ("COMPLETED", "FAILED", "STOPPED"):
                 job.completed_at = datetime.utcnow()
+            if error_message is not None:
+                job.error_message = error_message
             db.commit()
     except Exception as e:
         db.rollback()

@@ -15,6 +15,7 @@ import AdSignaling from './AdSignaling'
 import { startVodJob, stopVodJob } from '../../api/transcoder'
 
 const DEFAULT_INPUT = {
+  channel_name: '',
   input_type: 'FILE',
   input_url: '',
   clips: [],
@@ -101,6 +102,7 @@ export default function VODTranscoder() {
 
   const validate = () => {
     const e = {}
+    if (!input.channel_name?.trim()) e.channel_name = 'Channel Name is required'
     if (!input.input_url?.trim()) e.input_url = 'Input URL is required'
     if (variants.length === 0) e.variants = 'At least one output variant is required'
     if (output.output_destination === 'S3' && !output.s3_bucket?.trim()) e.s3_bucket = 'S3 bucket is required'
@@ -119,7 +121,7 @@ export default function VODTranscoder() {
     setSubmitting(true)
     try {
       const payload = {
-        name: output.master_filename || 'vod-job',
+        name: input.channel_name?.trim() || output.master_filename || 'vod-job',
         ...input,
         ...output,
         variants: variants,
