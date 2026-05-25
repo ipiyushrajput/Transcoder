@@ -348,13 +348,6 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
             logging.error(f"[VOD:{name}] Clip processing failed: {e}")
             return {"success": False, "error": str(e)}
 
-    # Process subtitles (segment_size must match video variants for EXTINF alignment)
-    sub_url = job_config.get("subtitle_url")
-    sub_lang = job_config.get("subtitle_language", "en")
-    sub_playlist = None
-    if sub_url:
-        sub_playlist = _process_subtitles(ffmpeg_path, sub_url, output_dir, sub_lang, segment_size)
-
     variants = job_config.get("variants", [])
     if not variants:
         return {"success": False, "error": "No output variants specified"}
@@ -363,6 +356,13 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
     segment_size = int(job_config.get("segment_length", 6))
     master_filename = job_config.get("master_filename", "master")
     preset = job_config.get("preset", "medium")
+
+    # Process subtitles (segment_size must match video variants for EXTINF alignment)
+    sub_url = job_config.get("subtitle_url")
+    sub_lang = job_config.get("subtitle_language", "en")
+    sub_playlist = None
+    if sub_url:
+        sub_playlist = _process_subtitles(ffmpeg_path, sub_url, output_dir, sub_lang, segment_size)
 
     # Build FFmpeg command
     if output_type == "HLS":
