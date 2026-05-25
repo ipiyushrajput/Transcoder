@@ -14,7 +14,7 @@ import LiveOutputSection from './OutputSection'
 import LiveVideoAudioConfig from './VideoAudioConfig'
 import { startLiveChannel, stopLiveChannel } from '../../api/transcoder'
 
-const DEFAULT_INPUT = { input_type: 'RTMP', input_url: '' }
+const DEFAULT_INPUT = { channel_name: '', input_type: 'RTMP', input_url: '' }
 const DEFAULT_OUTPUT = {
   output_type: 'HLS', output_destination: 'LOCAL',
   s3_bucket: '', s3_path: '', s3_cloudfront_domain: '',
@@ -82,6 +82,7 @@ export default function LiveTranscoder() {
 
   const validate = () => {
     const e = {}
+    if (!input.channel_name?.trim()) e.channel_name = 'Channel Name is required'
     if (!input.input_url?.trim()) e.input_url = 'Live input URL is required'
     if (variants.length === 0) e.variants = 'At least one output variant is required'
     if (output.output_type === 'HLS') {
@@ -102,7 +103,7 @@ export default function LiveTranscoder() {
     setSubmitting(true)
     try {
       const payload = {
-        name: output.master_filename || 'live-channel',
+        name: input.channel_name?.trim() || output.master_filename || 'live-channel',
         ...input,
         ...output,
         variants,

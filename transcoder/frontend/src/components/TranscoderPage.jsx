@@ -1,9 +1,8 @@
 import React, { useState } from 'react'
 import {
-  Box, AppBar, Toolbar, Typography, Tabs, Tab, Container,
-  Chip, Badge,
+  Box, AppBar, Toolbar, Typography, Tabs, Tab, Container, Chip,
 } from '@mui/material'
-import VideoFileIcon from '@mui/icons-material/VideoFile'
+import MovieIcon from '@mui/icons-material/Movie'
 import LiveTvIcon from '@mui/icons-material/LiveTv'
 import ListAltIcon from '@mui/icons-material/ListAlt'
 import VODTranscoder from './VOD/VODTranscoder'
@@ -18,9 +17,12 @@ export default function TranscoderPage() {
       <AppBar position="static" elevation={0} sx={{ bgcolor: 'background.paper', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
         <Toolbar>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mr: 4 }}>
-            <Box sx={{ width: 32, height: 32, borderRadius: 2, bgcolor: 'primary.main', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <VideoFileIcon sx={{ fontSize: 18, color: '#fff' }} />
-            </Box>
+            <Box
+              component="img"
+              src="https://images.samsung.com/is/image/samsung/assets/in/tvs/smart-tv/samsung-tv-plus/samsung-tv-plus-icon.jpg"
+              alt="Samsung TV Plus"
+              sx={{ width: 36, height: 36, borderRadius: 2, objectFit: 'cover', flexShrink: 0 }}
+            />
             <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: '-0.5px' }}>
               Transcoder
             </Typography>
@@ -34,7 +36,7 @@ export default function TranscoderPage() {
               '& .MuiTabs-indicator': { bgcolor: 'primary.main', height: 3, borderRadius: '3px 3px 0 0' },
             }}
           >
-            <Tab icon={<VideoFileIcon fontSize="small" />} iconPosition="start" label="VOD" />
+            <Tab icon={<MovieIcon fontSize="small" />} iconPosition="start" label="VOD" />
             <Tab icon={<LiveTvIcon fontSize="small" />} iconPosition="start" label="Live" />
             <Tab icon={<ListAltIcon fontSize="small" />} iconPosition="start" label="Jobs" />
           </Tabs>

@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
-  Box, Card, CardContent, Typography, Table, TableBody, TableCell,
-  TableContainer, TableHead, TableRow, Paper, Chip, IconButton,
+  Box, Card, Typography, Table, TableBody, TableCell,
+  TableContainer, TableHead, TableRow, Chip, IconButton,
   Button, TextField, Select, MenuItem, FormControl, InputLabel,
   Dialog, DialogTitle, DialogContent, DialogActions, Tooltip,
-  Alert, CircularProgress, Pagination, Stack,
+  Alert, CircularProgress, Pagination, Stack, LinearProgress,
 } from '@mui/material'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import DeleteIcon from '@mui/icons-material/Delete'
@@ -21,35 +21,93 @@ const STATUS_COLORS = {
   PENDING: 'default',
 }
 
-function LogsDialog({ open, jobId, onClose }) {
+function useElapsed(startedAt, active) {
+  const [elapsed, setElapsed] = useState('')
+  useEffect(() => {
+    if (!active || !startedAt) { setElapsed(''); return }
+    const update = () => {
+      const diff = Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000)
+      const m = Math.floor(diff / 60), s = diff % 60
+      setElapsed(`${m}m ${s}s`)
+    }
+    update()
+    const t = setInterval(update, 1000)
+    return () => clearInterval(t)
+  }, [active, startedAt])
+  return elapsed
+}
+
+function LogsDialog({ open, jobId, jobStatus, onClose }) {
   const [logs, setLogs] = useState('')
   const [loading, setLoading] = useState(false)
+  const intervalRef = useRef(null)
+  const bottomRef = useRef(null)
+
+  const fetchLogs = useCallback(async () => {
+    if (!jobId) return
+    try {
+      const d = await getJobLogs(jobId, 300)
+      setLogs(d.logs || 'No logs available')
+    } catch {
+      setLogs('Failed to load logs')
+    }
+  }, [jobId])
 
   useEffect(() => {
     if (!open || !jobId) return
     setLoading(true)
-    getJobLogs(jobId, 200)
-      .then((d) => setLogs(d.logs || ''))
-      .catch(() => setLogs('Failed to load logs'))
-      .finally(() => setLoading(false))
-  }, [open, jobId])
+    fetchLogs().finally(() => setLoading(false))
+
+    // Auto-refresh every 3s for RUNNING jobs; stop once done
+    if (jobStatus === 'RUNNING') {
+      intervalRef.current = setInterval(fetchLogs, 3000)
+    }
+    return () => clearInterval(intervalRef.current)
+  }, [open, jobId, jobStatus, fetchLogs])
+
+  // Stop polling when status changes away from RUNNING
+  useEffect(() => {
+    if (jobStatus !== 'RUNNING') clearInterval(intervalRef.current)
+  }, [jobStatus])
+
+  // Scroll to bottom when new logs arrive
+  useEffect(() => {
+    if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: 'smooth' })
+  }, [logs])
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
-      <DialogTitle>Job Logs — {jobId?.slice(0, 8)}</DialogTitle>
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        Job Logs — {jobId?.slice(0, 8)}
+        {jobStatus === 'RUNNING' && (
+          <Chip label="Live" color="success" size="small" sx={{ ml: 1, animation: 'none' }} />
+        )}
+        <Box sx={{ flex: 1 }} />
+        <IconButton size="small" onClick={fetchLogs}><RefreshIcon fontSize="small" /></IconButton>
+      </DialogTitle>
       <DialogContent>
         {loading ? (
-          <CircularProgress size={24} />
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}><CircularProgress size={24} /></Box>
         ) : (
           <Box
             component="pre"
-            sx={{ fontSize: 12, bgcolor: '#0d1117', p: 2, borderRadius: 1, overflow: 'auto', maxHeight: 500, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+            sx={{
+              fontSize: 11, bgcolor: '#0d1117', color: '#e6edf3', p: 2,
+              borderRadius: 1, overflow: 'auto', maxHeight: 500,
+              whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace',
+            }}
           >
             {logs || 'No logs available'}
+            <div ref={bottomRef} />
           </Box>
         )}
       </DialogContent>
       <DialogActions>
+        {jobStatus === 'RUNNING' && (
+          <Typography variant="caption" color="text.secondary" sx={{ flex: 1, ml: 1 }}>
+            Auto-refreshing every 3s
+          </Typography>
+        )}
         <Button onClick={onClose}>Close</Button>
       </DialogActions>
     </Dialog>
@@ -63,25 +121,19 @@ function JobDetailDialog({ open, jobId, onClose }) {
   useEffect(() => {
     if (!open || !jobId) return
     setLoading(true)
-    getJob(jobId)
-      .then(setJob)
-      .catch(() => setJob(null))
-      .finally(() => setLoading(false))
+    getJob(jobId).then(setJob).catch(() => setJob(null)).finally(() => setLoading(false))
   }, [open, jobId])
 
-  const copyUrl = () => {
-    if (job?.playback_url) navigator.clipboard.writeText(job.playback_url)
-  }
+  const copyUrl = () => { if (job?.playback_url) navigator.clipboard.writeText(job.playback_url) }
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle>Job Details — {job?.name || jobId?.slice(0, 8)}</DialogTitle>
       <DialogContent>
-        {loading ? (
-          <CircularProgress size={24} />
-        ) : job ? (
+        {loading ? <CircularProgress size={24} /> : job ? (
           <Stack spacing={2} sx={{ pt: 1 }}>
             <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 2 }}>
+              <Detail label="Channel Name" value={job.name} />
               <Detail label="Job ID" value={job.job_id} />
               <Detail label="Type" value={job.type} />
               <Detail label="Status" value={<Chip label={job.status} color={STATUS_COLORS[job.status] || 'default'} size="small" />} />
@@ -91,7 +143,7 @@ function JobDetailDialog({ open, jobId, onClose }) {
               <Detail label="Preset" value={job.preset} />
               <Detail label="Segment (s)" value={job.segment_length} />
               <Detail label="Started" value={job.started_at} />
-              <Detail label="Completed" value={job.completed_at} />
+              <Detail label="Completed" value={job.completed_at || '—'} />
             </Box>
             {job.playback_url && (
               <Box sx={{ bgcolor: 'background.default', p: 2, borderRadius: 1 }}>
@@ -106,7 +158,10 @@ function JobDetailDialog({ open, jobId, onClose }) {
             )}
             {job.error_message && (
               <Alert severity="error" sx={{ fontSize: 12 }}>
-                <Box component="pre" sx={{ whiteSpace: 'pre-wrap', m: 0 }}>{job.error_message.slice(-500)}</Box>
+                <Typography variant="caption" fontWeight={700}>Error Details:</Typography>
+                <Box component="pre" sx={{ whiteSpace: 'pre-wrap', m: 0, mt: 0.5, fontSize: 11 }}>
+                  {job.error_message.slice(-1000)}
+                </Box>
               </Alert>
             )}
             {job.variants?.length > 0 && (
@@ -116,7 +171,7 @@ function JobDetailDialog({ open, jobId, onClose }) {
                   <Table size="small">
                     <TableHead>
                       <TableRow>
-                        {['Resolution', 'Video Codec', 'Video Bitrate', 'Audio Codec', 'Audio Bitrate', 'FPS'].map((h) => (
+                        {['Resolution', 'Video Codec', 'Video Bitrate', 'Audio Codec', 'Audio Bitrate', 'FPS'].map(h => (
                           <TableCell key={h} sx={{ fontWeight: 600, fontSize: 11 }}>{h}</TableCell>
                         ))}
                       </TableRow>
@@ -138,13 +193,9 @@ function JobDetailDialog({ open, jobId, onClose }) {
               </Box>
             )}
           </Stack>
-        ) : (
-          <Typography color="error">Failed to load job details</Typography>
-        )}
+        ) : <Typography color="error">Failed to load job details</Typography>}
       </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Close</Button>
-      </DialogActions>
+      <DialogActions><Button onClick={onClose}>Close</Button></DialogActions>
     </Dialog>
   )
 }
@@ -160,6 +211,34 @@ function Detail({ label, value, truncate }) {
   )
 }
 
+function RunningCell({ startedAt }) {
+  const elapsed = useElapsed(startedAt, true)
+  return (
+    <Box>
+      <LinearProgress sx={{ height: 4, borderRadius: 2, mb: 0.5 }} />
+      <Typography variant="caption" color="text.secondary">{elapsed || '—'}</Typography>
+    </Box>
+  )
+}
+
+function CompletedCell({ completedAt, startedAt, status }) {
+  if (status === 'RUNNING') return <RunningCell startedAt={startedAt} />
+  if (!completedAt) return <Typography variant="caption" color="text.secondary">—</Typography>
+  const d = new Date(completedAt)
+  return (
+    <Box>
+      <Typography variant="caption" display="block">
+        {d.toLocaleDateString()} {d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+      </Typography>
+      {startedAt && (
+        <Typography variant="caption" color="text.secondary">
+          {Math.round((d - new Date(startedAt)) / 1000)}s duration
+        </Typography>
+      )}
+    </Box>
+  )
+}
+
 export default function JobsTable() {
   const [jobs, setJobs] = useState([])
   const [total, setTotal] = useState(0)
@@ -167,7 +246,7 @@ export default function JobsTable() {
   const [loading, setLoading] = useState(false)
   const [typeFilter, setTypeFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
-  const [logsJobId, setLogsJobId] = useState(null)
+  const [logsJob, setLogsJob] = useState(null)   // { job_id, status }
   const [detailJobId, setDetailJobId] = useState(null)
   const [error, setError] = useState('')
   const PER_PAGE = 15
@@ -190,12 +269,20 @@ export default function JobsTable() {
   }, [page, typeFilter, statusFilter])
 
   useEffect(() => { fetchJobs() }, [fetchJobs])
-
-  // Auto-refresh every 5s
   useEffect(() => {
     const t = setInterval(fetchJobs, 5000)
     return () => clearInterval(t)
   }, [fetchJobs])
+
+  // Keep logs dialog job status in sync with jobs list
+  useEffect(() => {
+    if (logsJob) {
+      const updated = jobs.find(j => j.job_id === logsJob.job_id)
+      if (updated && updated.status !== logsJob.status) {
+        setLogsJob({ job_id: logsJob.job_id, status: updated.status })
+      }
+    }
+  }, [jobs, logsJob])
 
   const handleStop = async (job) => {
     if (!window.confirm(`Stop ${job.type} job "${job.name}"?`)) return
@@ -203,9 +290,7 @@ export default function JobsTable() {
       if (job.type === 'VOD') await stopVodJob(job.job_id)
       else await stopLiveChannel(job.job_id)
       fetchJobs()
-    } catch (e) {
-      alert(`Stop failed: ${e.message}`)
-    }
+    } catch (e) { alert(`Stop failed: ${e.message}`) }
   }
 
   const handleDelete = async (job) => {
@@ -213,9 +298,7 @@ export default function JobsTable() {
     try {
       await deleteJob(job.job_id)
       fetchJobs()
-    } catch (e) {
-      alert(`Delete failed: ${e.message}`)
-    }
+    } catch (e) { alert(`Delete failed: ${e.message}`) }
   }
 
   return (
@@ -234,7 +317,7 @@ export default function JobsTable() {
           <InputLabel>Status</InputLabel>
           <Select value={statusFilter} label="Status" onChange={(e) => { setStatusFilter(e.target.value); setPage(1) }}>
             <MenuItem value="">All</MenuItem>
-            {['RUNNING', 'COMPLETED', 'FAILED', 'STOPPED', 'PENDING'].map((s) => (
+            {['RUNNING', 'COMPLETED', 'FAILED', 'STOPPED', 'PENDING'].map(s => (
               <MenuItem key={s} value={s}>{s}</MenuItem>
             ))}
           </Select>
@@ -251,25 +334,26 @@ export default function JobsTable() {
           <Table size="small">
             <TableHead>
               <TableRow sx={{ '& th': { fontWeight: 600, bgcolor: 'rgba(124,110,250,0.12)' } }}>
-                <TableCell>Name</TableCell>
+                <TableCell>Channel Name</TableCell>
                 <TableCell>Type</TableCell>
                 <TableCell>Status</TableCell>
                 <TableCell>Input</TableCell>
                 <TableCell>Output</TableCell>
                 <TableCell>Playback URL</TableCell>
                 <TableCell>Created</TableCell>
+                <TableCell>Completed / Progress</TableCell>
                 <TableCell align="right">Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
               {jobs.length === 0 && !loading && (
                 <TableRow>
-                  <TableCell colSpan={8} align="center" sx={{ py: 6, color: 'text.secondary' }}>
+                  <TableCell colSpan={9} align="center" sx={{ py: 6, color: 'text.secondary' }}>
                     No jobs found
                   </TableCell>
                 </TableRow>
               )}
-              {jobs.map((job) => (
+              {jobs.map(job => (
                 <TableRow key={job.job_id} hover>
                   <TableCell>
                     <Typography variant="body2" sx={{ fontWeight: 600 }}>{job.name}</Typography>
@@ -280,10 +364,9 @@ export default function JobsTable() {
                       color={job.type === 'LIVE' ? 'error' : 'primary'} />
                   </TableCell>
                   <TableCell>
-                    <Chip label={job.status} size="small" color={STATUS_COLORS[job.status] || 'default'}
-                      sx={{ fontWeight: 600 }} />
+                    <Chip label={job.status} size="small" color={STATUS_COLORS[job.status] || 'default'} sx={{ fontWeight: 600 }} />
                   </TableCell>
-                  <TableCell sx={{ maxWidth: 180 }}>
+                  <TableCell sx={{ maxWidth: 160 }}>
                     <Tooltip title={job.input_url}>
                       <Typography variant="caption" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>
                         {job.input_url}
@@ -293,11 +376,11 @@ export default function JobsTable() {
                   <TableCell>
                     <Typography variant="caption">{job.output_type} → {job.output_destination}</Typography>
                   </TableCell>
-                  <TableCell sx={{ maxWidth: 200 }}>
+                  <TableCell sx={{ maxWidth: 180 }}>
                     {job.playback_url ? (
                       <Tooltip title={job.playback_url}>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                          <Typography variant="caption" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', maxWidth: 160 }}>
+                          <Typography variant="caption" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', maxWidth: 140 }}>
                             {job.playback_url}
                           </Typography>
                           <IconButton size="small" onClick={() => navigator.clipboard.writeText(job.playback_url)}>
@@ -312,6 +395,9 @@ export default function JobsTable() {
                       {job.created_at ? new Date(job.created_at).toLocaleString() : '—'}
                     </Typography>
                   </TableCell>
+                  <TableCell sx={{ minWidth: 130 }}>
+                    <CompletedCell completedAt={job.completed_at} startedAt={job.started_at} status={job.status} />
+                  </TableCell>
                   <TableCell align="right">
                     <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
                       <Tooltip title="Details">
@@ -320,7 +406,7 @@ export default function JobsTable() {
                         </IconButton>
                       </Tooltip>
                       <Tooltip title="Logs">
-                        <IconButton size="small" onClick={() => setLogsJobId(job.job_id)}>
+                        <IconButton size="small" onClick={() => setLogsJob({ job_id: job.job_id, status: job.status })}>
                           <ListAltIconSmall />
                         </IconButton>
                       </Tooltip>
@@ -353,13 +439,19 @@ export default function JobsTable() {
         </Box>
       )}
 
-      <LogsDialog open={!!logsJobId} jobId={logsJobId} onClose={() => setLogsJobId(null)} />
+      <LogsDialog
+        open={!!logsJob}
+        jobId={logsJob?.job_id}
+        jobStatus={logsJob?.status}
+        onClose={() => setLogsJob(null)}
+      />
       <JobDetailDialog open={!!detailJobId} jobId={detailJobId} onClose={() => setDetailJobId(null)} />
+
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </Box>
   )
 }
 
-// Tiny inline icon to avoid import cycle
 function ListAltIconSmall() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">

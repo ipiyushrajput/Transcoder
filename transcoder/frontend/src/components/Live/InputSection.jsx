@@ -82,6 +82,18 @@ export default function LiveInputSection({ value, onChange }) {
           Live Input Configuration
         </Typography>
 
+        <Grid container spacing={2} sx={{ mb: 2 }}>
+          <Grid item xs={12}>
+            <TextField
+              fullWidth size="small" label="Channel Name *"
+              placeholder="e.g. Live-News-Channel or Samsung-TVPlus-LIVE"
+              value={value.channel_name || ''}
+              onChange={(e) => set('channel_name', e.target.value)}
+              helperText="Unique identifier for this live channel (used in the Jobs table)"
+            />
+          </Grid>
+        </Grid>
+
         <Grid container spacing={2}>
           <Grid item xs={12} md={3}>
             <FormControl fullWidth size="small">

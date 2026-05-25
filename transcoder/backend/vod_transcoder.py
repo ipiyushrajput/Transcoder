@@ -63,8 +63,8 @@ def _build_input_clipping_ffconcat(input_url: str, clips: list, fps: float, tmp_
     return concat_path
 
 
-def _process_subtitles(ffmpeg_path: str, subtitle_url: str, output_dir: str, lang: str = "en") -> Optional[str]:
-    """Generate HLS subtitle playlist from subtitle file. Returns playlist path or None."""
+def _process_subtitles(ffmpeg_path: str, subtitle_url: str, output_dir: str, lang: str = "en", segment_size: int = 6) -> Optional[str]:
+    """Generate HLS subtitle playlist from subtitle file, aligned to segment_size. Returns playlist path or None."""
     if not subtitle_url:
         return None
 
@@ -79,7 +79,7 @@ def _process_subtitles(ffmpeg_path: str, subtitle_url: str, output_dir: str, lan
         "-map", "0:0",
         "-c:s", "webvtt",
         "-f", "segment",
-        "-segment_time", "6",
+        "-segment_time", str(segment_size),
         "-segment_list_type", "m3u8",
         "-hls_playlist_type", "vod",
         "-segment_list", playlist_path,
@@ -88,8 +88,11 @@ def _process_subtitles(ffmpeg_path: str, subtitle_url: str, output_dir: str, lan
     ]
 
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
-        logging.info(f"Subtitle HLS generated: {playlist_path}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            logging.error(f"Subtitle processing failed (rc={result.returncode}): {result.stderr[-500:]}")
+            return None
+        logging.info(f"Subtitle HLS generated: {playlist_path} (segment={segment_size}s)")
         return playlist_path
     except Exception as e:
         logging.error(f"Subtitle processing failed: {e}")
@@ -150,23 +153,32 @@ def build_vod_ffmpeg_command(
     hls_list_size: int = 0,
     ffmpeg_path: str = "ffmpeg",
     use_concat: bool = False,
+    deinterlace: bool = True,
 ) -> List[str]:
-    """
-    Build ffmpeg command for multi-bitrate HLS output.
-    Codec settings based on existing s3_transcoder.py and ffmpeg.py patterns.
-    """
+    """Build ffmpeg command for multi-bitrate HLS output."""
     num = len(variants)
     split_labels = [f"[v{i}]" for i in range(num)]
 
-    # filter_complex: split video + scale each variant + split audio
+    # filter_complex: split video + optional deinterlace + scale each variant + split audio
     filter_parts = [f"[0:v]split={num}{''.join(split_labels)}"]
     for i, v in enumerate(variants):
         w, h = v["width"], v["height"]
-        scale_filter = f"scale=w={w}:h={h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"
+        # yadif with deint=1 only processes frames flagged as interlaced; safe for progressive sources
+        deint_filter = "yadif=mode=0:parity=auto:deint=1," if deinterlace else ""
+        scale_filter = f"{deint_filter}scale=w={w}:h={h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"
         filter_parts.append(f"[v{i}]{scale_filter}[v{i}out]")
-    filter_parts.append(
-        f"[0:a]asplit={num}{''.join(f'[a{i}out]' for i in range(num))}"
-    )
+
+    # For ffconcat inputs, add aresample to prevent audio overlap at clip boundaries
+    if use_concat:
+        filter_parts.append(f"[0:a]aresample=async=1000[a_resampled]")
+        filter_parts.append(
+            f"[a_resampled]asplit={num}{''.join(f'[a{i}out]' for i in range(num))}"
+        )
+    else:
+        filter_parts.append(
+            f"[0:a]asplit={num}{''.join(f'[a{i}out]' for i in range(num))}"
+        )
+
     filter_complex = "; ".join(filter_parts)
 
     cmd = [ffmpeg_path, "-y", "-hide_banner"]
@@ -175,6 +187,8 @@ def build_vod_ffmpeg_command(
         cmd.extend(["-safe", "0"])
         # Required when ffconcat entries reference http/https URLs
         cmd.extend(["-protocol_whitelist", "file,http,https,tcp,tls,crypto"])
+        # Regenerate timestamps to avoid audio drift at clip boundaries
+        cmd.extend(["-fflags", "+genpts"])
     cmd.extend(["-i", input_path])
     cmd.extend(["-filter_complex", filter_complex])
 
@@ -334,12 +348,12 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
             logging.error(f"[VOD:{name}] Clip processing failed: {e}")
             return {"success": False, "error": str(e)}
 
-    # Process subtitles
+    # Process subtitles (segment_size must match video variants for EXTINF alignment)
     sub_url = job_config.get("subtitle_url")
     sub_lang = job_config.get("subtitle_language", "en")
     sub_playlist = None
     if sub_url:
-        sub_playlist = _process_subtitles(ffmpeg_path, sub_url, output_dir, sub_lang)
+        sub_playlist = _process_subtitles(ffmpeg_path, sub_url, output_dir, sub_lang, segment_size)
 
     variants = job_config.get("variants", [])
     if not variants:
@@ -498,11 +512,11 @@ def _monitor_vod_process(job_id: str, db_update_callback=None):
                 master_path = os.path.join(output_dir, f"{master_filename}.m3u8")
                 _update_master_for_subtitles(master_path, sub_lang)
 
-            # Post-processing: ESAM injection
+            # Post-processing: ESAM injection into video variants and subtitle playlist
             if job_config.get("esam_enabled") and job_config.get("esam_scc_xml"):
                 events = parse_esam_scc_xml(job_config["esam_scc_xml"])
                 if events and output_type == "HLS":
-                    cnt = process_esam_on_output(output_dir, events)
+                    cnt = process_esam_on_output(output_dir, events, sub_playlist)
                     logging.info(f"[VOD:{name}] Injected {cnt} ESAM markers")
 
             # Final S3 upload (batch)
@@ -528,7 +542,7 @@ def _monitor_vod_process(job_id: str, db_update_callback=None):
             error_msg = ""
             try:
                 with open(pinfo["log_path"], "r") as f:
-                    error_msg = f.read()[-2000:]
+                    error_msg = f.read()[-3000:]
             except Exception:
                 pass
             pinfo["error_message"] = error_msg
@@ -536,8 +550,9 @@ def _monitor_vod_process(job_id: str, db_update_callback=None):
         pinfo["status"] = status
         pinfo["completed_at"] = datetime.utcnow().isoformat()
 
+        error_to_save = pinfo.get("error_message") if status == "FAILED" else None
         if db_update_callback:
-            db_update_callback(job_id, status, None)
+            db_update_callback(job_id, status, None, error_to_save)
 
         # Cleanup temp dir
         try:
