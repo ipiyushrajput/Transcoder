@@ -21,6 +21,11 @@ _vod_processes = {}
 _vod_locks = {}
 _executor = ThreadPoolExecutor(max_workers=10)
 
+# Persistent log directory (survives job completion)
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_LOGS_DIR = os.path.join(_BACKEND_DIR, "logs")
+os.makedirs(_LOGS_DIR, exist_ok=True)
+
 
 def _get_fps(input_url: str) -> float:
     try:
@@ -415,8 +420,9 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
             use_concat=use_concat,
         )
 
-    log_path = os.path.join(tmp_dir, "ffmpeg.log")
+    log_path = os.path.join(_LOGS_DIR, f"vod_{job_id}.log")
     logging.info(f"[VOD:{name}] FFmpeg cmd: {' '.join(ffmpeg_cmd)}")
+    logging.info(f"[VOD:{name}] FFmpeg log: {log_path}")
 
     observer = handler = periodic = None
     s3_client = None
@@ -584,6 +590,13 @@ def _monitor_vod_process(job_id: str, db_update_callback=None):
         pinfo["status"] = status
         pinfo["completed_at"] = datetime.utcnow().isoformat()
 
+        # Append a status marker to the persistent log so it's always visible
+        try:
+            with open(pinfo["log_path"], "a", errors="replace") as lf:
+                lf.write(f"\n\n--- Transcoder: FFmpeg exit code {returncode} | Status: {status} | {datetime.utcnow().isoformat()} ---\n")
+        except Exception:
+            pass
+
         error_to_save = pinfo.get("error_message") if status == "FAILED" else None
         if db_update_callback:
             db_update_callback(job_id, status, None, error_to_save)
@@ -691,15 +704,18 @@ def list_active_vod_jobs() -> list:
 
 
 def get_vod_job_logs(job_id: str, tail: int = 100) -> str:
-    """Get last N lines of FFmpeg log for a job."""
+    """Get last N lines of FFmpeg log for a job. Works for running AND finished jobs."""
     pinfo = _vod_processes.get(job_id)
-    if not pinfo:
-        return ""
-    log_path = pinfo.get("log_path", "")
+    if pinfo:
+        log_path = pinfo.get("log_path", "")
+    else:
+        # Job finished — check persistent log directory
+        log_path = os.path.join(_LOGS_DIR, f"vod_{job_id}.log")
+
     if not log_path or not os.path.exists(log_path):
         return ""
     try:
-        with open(log_path, "r") as f:
+        with open(log_path, "r", errors="replace") as f:
             lines = f.readlines()
         return "".join(lines[-tail:])
     except Exception:

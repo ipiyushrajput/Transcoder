@@ -15,6 +15,10 @@ _live_channels = {}
 _live_locks = {}
 _executor = ThreadPoolExecutor(max_workers=10)
 
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_LOGS_DIR = os.path.join(_BACKEND_DIR, "logs")
+os.makedirs(_LOGS_DIR, exist_ok=True)
+
 
 def build_live_hls_command(
     input_url: str,
@@ -207,8 +211,9 @@ def start_live_channel(channel_config: dict, db_update_callback=None) -> dict:
             input_type=input_type,
         )
 
-    log_path = os.path.join(tmp_dir, "ffmpeg.log")
+    log_path = os.path.join(_LOGS_DIR, f"live_{channel_id}.log")
     logging.info(f"[LIVE:{name}] FFmpeg cmd: {' '.join(ffmpeg_cmd)}")
+    logging.info(f"[LIVE:{name}] FFmpeg log: {log_path}")
 
     # Start S3 watcher
     observer = handler = periodic = None
@@ -400,14 +405,17 @@ def list_active_live_channels() -> list:
 
 
 def get_live_channel_logs(channel_id: str, tail: int = 100) -> str:
+    """Get last N lines of FFmpeg log. Works for running AND finished channels."""
     pinfo = _live_channels.get(channel_id)
-    if not pinfo:
-        return ""
-    log_path = pinfo.get("log_path", "")
+    if pinfo:
+        log_path = pinfo.get("log_path", "")
+    else:
+        log_path = os.path.join(_LOGS_DIR, f"live_{channel_id}.log")
+
     if not log_path or not os.path.exists(log_path):
         return ""
     try:
-        with open(log_path, "r") as f:
+        with open(log_path, "r", errors="replace") as f:
             lines = f.readlines()
         return "".join(lines[-tail:])
     except Exception:

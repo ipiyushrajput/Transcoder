@@ -63,10 +63,13 @@ function LogsDialog({ open, jobId, jobStatus, onClose }) {
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-        Job Logs — {jobId?.slice(0, 8)}
-        {jobStatus === 'RUNNING' && (
-          <Chip label="Live" color="success" size="small" sx={{ ml: 1, animation: 'none' }} />
-        )}
+        FFmpeg Logs — {jobId?.slice(0, 8)}
+        <Chip
+          label={jobStatus}
+          color={STATUS_COLORS[jobStatus] || 'default'}
+          size="small"
+          sx={{ ml: 1 }}
+        />
         <Box sx={{ flex: 1 }} />
         <IconButton size="small" onClick={fetchLogs}><RefreshIcon fontSize="small" /></IconButton>
       </DialogTitle>
@@ -82,17 +85,15 @@ function LogsDialog({ open, jobId, jobStatus, onClose }) {
               whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace',
             }}
           >
-            {logs || 'No logs available'}
+            {logs || 'No logs found for this job.'}
             <div ref={bottomRef} />
           </Box>
         )}
       </DialogContent>
       <DialogActions>
-        {jobStatus === 'RUNNING' && (
-          <Typography variant="caption" color="text.secondary" sx={{ flex: 1, ml: 1 }}>
-            Auto-refreshing every 10s
-          </Typography>
-        )}
+        <Typography variant="caption" color="text.secondary" sx={{ flex: 1, ml: 1 }}>
+          {jobStatus === 'RUNNING' ? 'Auto-refreshing every 10s' : 'Showing last 300 lines'}
+        </Typography>
         <Button onClick={onClose}>Close</Button>
       </DialogActions>
     </Dialog>

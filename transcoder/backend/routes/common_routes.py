@@ -223,6 +223,10 @@ def get_job_logs(job_id):
     else:
         logs = get_vod_job_logs(job_id, tail)
 
+    # Fall back to DB error_message when no log file is available (older jobs)
+    if not logs and job and job.error_message:
+        logs = f"[No log file found. Last recorded error:]\n\n{job.error_message}"
+
     return jsonify({"job_id": job_id, "logs": logs}), 200
 
 

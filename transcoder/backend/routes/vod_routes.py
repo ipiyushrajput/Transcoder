@@ -146,7 +146,7 @@ def start_job():
     job_config = {
         "job_id": job_id,
         "name": data.get("name", f"vod-{job_id[:8]}"),
-        "input_url": data["input_url"],
+        "input_url": data["input_url"].strip(),
         "input_type": data.get("input_type", "FILE"),
         "clips": data.get("clips", []),
         "subtitle_url": data.get("subtitle_url"),
