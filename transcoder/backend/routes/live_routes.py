@@ -127,7 +127,7 @@ def start_channel():
     channel_config = {
         "channel_id": channel_id,
         "name": data.get("name", f"live-{channel_id[:8]}"),
-        "input_url": data["input_url"],
+        "input_url": data["input_url"].strip(),
         "input_type": data.get("input_type", "HLS"),
         "output_type": data.get("output_type", "HLS"),
         "output_destination": data.get("output_destination", "LOCAL"),
