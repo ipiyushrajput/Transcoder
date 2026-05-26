@@ -1,3 +1,5 @@
+import html
+import re
 import xml.etree.ElementTree as ET
 import logging
 from pathlib import Path
@@ -9,12 +11,16 @@ ESAM_NS = {
     "common": "urn:cablelabs:iptvservices:esam:xsd:common:1",
 }
 
+MCC_NS = {
+    "ns2": "http://www.cablelabs.com/namespaces/metadata/xsd/confirmation/2",
+    "ns3": "http://www.cablelabs.com/namespaces/metadata/xsd/signaling/2",
+}
+
 
 def parse_esam_scc_xml(xml_string: str) -> list:
-    """Parse ESAM Signal Conditioning Configuration XML. Returns list of events."""
+    """Parse ESAM Signal Conditioning Configuration XML. Returns sorted list of events."""
     if not xml_string or not xml_string.strip():
         return []
-
     try:
         root = ET.fromstring(xml_string)
     except ET.ParseError as e:
@@ -37,6 +43,7 @@ def parse_esam_scc_xml(xml_string: str) -> list:
             "duration": None,
             "segmentTypeId": None,
             "segmentEventId": None,
+            "acquisitionSignalID": rs.get("acquisitionSignalID"),
         }
 
         if seginfo is not None:
@@ -52,12 +59,57 @@ def parse_esam_scc_xml(xml_string: str) -> list:
         events.append(ev)
 
     events.sort(key=lambda x: x["npt"])
-    logging.info(f"Parsed {len(events)} ESAM events")
+    logging.info(f"Parsed {len(events)} ESAM events from SCC XML")
     return events
 
 
-def _parse_variant_segments(m3u8_path: Path):
-    """Parse an HLS variant playlist and return (lines, segments, total_duration)."""
+def parse_mcc_xml_asset_tags(xml_string: str) -> dict:
+    """
+    Parse ESAM Manifest Confirm Condition XML.
+    Returns {acquisitionSignalID: '#EXT-X-ASSET:...'} map.
+    """
+    if not xml_string or not xml_string.strip():
+        logging.warning("MCC XML is empty, returning empty asset tags map")
+        return {}
+
+    asset_tags_map = {}
+    try:
+        root = ET.fromstring(xml_string)
+        for manifest_response in root.findall(".//ns2:ManifestResponse", MCC_NS):
+            acq_id = manifest_response.get("acquisitionSignalID")
+            if not acq_id:
+                logging.warning("MCC ManifestResponse missing acquisitionSignalID, skipping")
+                continue
+
+            asset_tag = None
+            for tag_el in manifest_response.findall(".//ns2:Tag", MCC_NS):
+                value = tag_el.get("value")
+                if value:
+                    decoded = html.unescape(value)
+                    m = re.search(r"(#EXT-X-ASSET:[^\n<]*)", decoded)
+                    if m:
+                        asset_tag = m.group(1).strip().rstrip("-->").strip()
+                        break
+
+            if asset_tag:
+                asset_tags_map[acq_id] = asset_tag
+                logging.debug(f"MCC asset tag for {acq_id}: {asset_tag}")
+            else:
+                logging.warning(f"No #EXT-X-ASSET tag found for acquisitionSignalID '{acq_id}'")
+
+    except ET.ParseError as e:
+        logging.error(f"Failed to parse MCC XML: {e}")
+        return {}
+    except Exception as e:
+        logging.error(f"Unexpected error parsing MCC XML: {e}")
+        return {}
+
+    logging.info(f"Parsed {len(asset_tags_map)} asset tag(s) from MCC XML")
+    return asset_tags_map
+
+
+def parse_variant_segments(m3u8_path: Path):
+    """Parse an HLS variant playlist. Returns (lines, segments, total_duration)."""
     text = m3u8_path.read_text(encoding="utf-8")
     lines = text.splitlines(keepends=True)
     segments = []
@@ -92,10 +144,7 @@ def _has_marker_near(lines, insert_index, prefixes):
 
 
 def _is_master_playlist(lines) -> bool:
-    for ln in lines:
-        if ln.strip().startswith("#EXT-X-STREAM-INF"):
-            return True
-    return False
+    return any(ln.strip().startswith("#EXT-X-STREAM-INF") for ln in lines)
 
 
 def _find_variant_paths(lines, basepath: Path) -> list:
@@ -109,22 +158,30 @@ def _find_variant_paths(lines, basepath: Path) -> list:
                 j += 1
             if j < len(lines):
                 uri = lines[j].strip()
-                abs_path = (basepath / uri).resolve()
-                variants.append((uri, abs_path))
+                variants.append((uri, (basepath / uri).resolve()))
             i = j
         else:
             i += 1
     return variants
 
 
-def inject_markers_into_variant(m3u8_path: Path, events: list) -> int:
-    """Inject CUE-OUT/CUE-IN/CUE-OUT-CONT markers into a variant playlist. Returns count injected."""
-    lines, segments, total = _parse_variant_segments(m3u8_path)
+def inject_markers_into_variant(m3u8_path: Path, events: list, asset_tags_map: dict = None) -> int:
+    """
+    Inject ESAM ad markers into a variant playlist using Elemental-style format:
+      #EXT-X-CUE-OUT:0
+      #EXT-X-ASSET:CAID=...,... (from MCC XML)
+      #EXT-X-CUE-IN
+    Returns count of marker lines inserted.
+    """
+    if asset_tags_map is None:
+        asset_tags_map = {}
+
+    lines, segments, total = parse_variant_segments(m3u8_path)
     if not segments:
-        logging.info(f"{m3u8_path.name}: no segments found, skipping")
+        logging.info(f"{m3u8_path.name}: no segments found, skipping ESAM injection")
         return 0
 
-    # Map each event to the segment it falls in
+    # Map each event to a segment index
     plans = []
     for ev in events:
         npt = ev["npt"]
@@ -137,92 +194,77 @@ def inject_markers_into_variant(m3u8_path: Path, events: list) -> int:
         if not matched:
             if npt <= total:
                 plans.append((len(segments) - 1, ev))
-            else:
-                logging.info(f"{m3u8_path.name}: skipping signal at {npt:.2f}s (beyond {total:.2f}s)")
 
     if not plans:
         return 0
 
-    # Insert from back to front to preserve indices
     plans.sort(key=lambda x: x[0], reverse=True)
 
     inserted = 0
     for idx, ev in plans:
         sstart, send, sfile, sline = segments[idx]
-        insert_pos = sline
-        stype = ev.get("segmentTypeId")
-        duration = ev.get("duration") or 30.0
+        insert_pos = sline  # Insert before the segment URI line
+        stype = str(ev.get("segmentTypeId", ""))
 
-        if _has_marker_near(lines, insert_pos, ["#EXT-X-CUE-OUT", "#EXT-X-CUE-IN", "#EXT-X-CUE-OUT-CONT"]):
-            logging.info(f"{m3u8_path.name}: marker already exists near {sfile}")
+        marker_prefixes = ["#EXT-X-CUE-OUT", "#EXT-X-CUE-IN", "#EXT-X-ASSET"]
+        if _has_marker_near(lines, insert_pos, marker_prefixes):
+            logging.info(f"{m3u8_path.name}: marker already near {sfile}, skipping")
             continue
 
         if stype == "53":
             lines.insert(insert_pos, "#EXT-X-CUE-IN\n")
             inserted += 1
-            logging.info(f"{m3u8_path.name}: CUE-IN before {sfile} at {ev['npt']:.2f}s")
+            logging.info(f"{m3u8_path.name}: CUE-IN before {sfile} at {ev['npt']:.3f}s")
             continue
 
-        # CUE-OUT start
-        cueout_tag = f"#EXT-X-CUE-OUT:{duration:.3f}\n"
-        lines.insert(insert_pos, cueout_tag)
-        inserted += 1
-        logging.info(f"{m3u8_path.name}: CUE-OUT({duration}) before {sfile} at {ev['npt']:.2f}s")
+        # Elemental-style: CUE-OUT:0 + optional ASSET tag + CUE-IN (point-in-time)
+        acq_id = ev.get("acquisitionSignalID")
+        lines_to_insert = ["#EXT-X-CUE-OUT:0\n"]
+        if acq_id and acq_id in asset_tags_map:
+            lines_to_insert.append(f"{asset_tags_map[acq_id]}\n")
+        lines_to_insert.append("#EXT-X-CUE-IN\n")
 
-        # Add CUE-OUT-CONT for subsequent segments
-        j = idx + 1
-        while j < len(segments):
-            seg_start, seg_end, seg_file, seg_line = segments[j]
-            elapsed = seg_start - sstart
-            if elapsed >= duration:
-                if not _has_marker_near(lines, seg_line, ["#EXT-X-CUE-IN"]):
-                    lines.insert(seg_line, "#EXT-X-CUE-IN\n")
-                    inserted += 1
-                    logging.info(f"{m3u8_path.name}: CUE-IN at elapsed {elapsed:.2f}s")
-                break
-            cont_tag = f"#EXT-X-CUE-OUT-CONT:{elapsed:.3f}/{int(duration)}\n"
-            if not _has_marker_near(lines, seg_line, ["#EXT-X-CUE-OUT-CONT"]):
-                lines.insert(seg_line, cont_tag)
-                inserted += 1
-            j += 1
-        else:
-            last_line = segments[-1][3]
-            if not _has_marker_near(lines, last_line + 1, ["#EXT-X-CUE-IN"]):
-                lines.insert(last_line + 1, "#EXT-X-CUE-IN\n")
-                inserted += 1
+        for offset, tag in enumerate(lines_to_insert):
+            lines.insert(insert_pos + offset, tag)
+        inserted += len(lines_to_insert)
+        logging.info(f"{m3u8_path.name}: CUE-OUT:0 + CUE-IN before {sfile} at {ev['npt']:.3f}s (acq={acq_id})")
 
     m3u8_path.write_text("".join(lines), encoding="utf-8")
     return inserted
 
 
 def _find_subtitle_playlist_paths(lines, basepath: Path) -> list:
-    """Find subtitle playlist URIs from #EXT-X-MEDIA:TYPE=SUBTITLES tags."""
+    """Extract subtitle playlist paths from #EXT-X-MEDIA:TYPE=SUBTITLES lines."""
     paths = []
     for line in lines:
         ln = line.strip()
-        if ln.startswith("#EXT-X-MEDIA:TYPE=SUBTITLES") or "TYPE=SUBTITLES" in ln:
-            # Extract URI="..." value
-            import re
+        if "TYPE=SUBTITLES" in ln:
             m = re.search(r'URI="([^"]+)"', ln)
             if m:
                 uri = m.group(1)
-                abs_path = (basepath / uri).resolve()
-                paths.append((uri, abs_path))
+                paths.append((uri, (basepath / uri).resolve()))
     return paths
 
 
-def process_esam_on_output(output_dir: str, events: list, subtitle_playlist_path: str = None) -> int:
-    """Process ESAM markers on all variant playlists and optionally the subtitle playlist."""
+def process_esam_on_output(
+    output_dir: str,
+    events: list,
+    subtitle_playlist_path: str = None,
+    mcc_xml: str = None,
+) -> int:
+    """Inject ESAM markers into all variant playlists (and subtitle playlist if present)."""
     if not events:
         return 0
+
+    asset_tags_map = {}
+    if mcc_xml:
+        asset_tags_map = parse_mcc_xml_asset_tags(mcc_xml)
 
     output_path = Path(output_dir)
     total = 0
 
-    # Find master playlist
-    master_candidates = list(output_path.glob("*.m3u8"))
     master = None
-    for candidate in master_candidates:
+    for candidate in output_path.glob("*.m3u8"):
         content = candidate.read_text(encoding="utf-8").splitlines(keepends=True)
         if _is_master_playlist(content):
             master = candidate
@@ -231,42 +273,39 @@ def process_esam_on_output(output_dir: str, events: list, subtitle_playlist_path
     if master:
         content = master.read_text(encoding="utf-8").splitlines(keepends=True)
         variants = _find_variant_paths(content, output_path)
-        logging.info(f"ESAM: processing {len(variants)} video variant(s) from master {master.name}")
+        logging.info(f"ESAM: {len(variants)} video variant(s) from {master.name}")
         for uri, abs_path in variants:
             if abs_path.exists():
-                cnt = inject_markers_into_variant(abs_path, events)
+                cnt = inject_markers_into_variant(abs_path, events, asset_tags_map)
                 total += cnt
-                logging.info(f"  Injected {cnt} markers into {uri}")
+                logging.info(f"  {uri}: {cnt} markers injected")
             else:
                 logging.warning(f"  Variant not found: {abs_path}")
 
-        # Also inject into subtitle playlists referenced by #EXT-X-MEDIA
         sub_paths = _find_subtitle_playlist_paths(content, output_path)
         for uri, abs_path in sub_paths:
             if abs_path.exists():
-                cnt = inject_markers_into_variant(abs_path, events)
+                cnt = inject_markers_into_variant(abs_path, events, asset_tags_map)
                 total += cnt
-                logging.info(f"  Injected {cnt} ESAM markers into subtitle playlist {uri}")
+                logging.info(f"  subtitle {uri}: {cnt} markers injected")
     else:
-        # No master found; process all non-master m3u8 files
-        for m3u8 in master_candidates:
+        for m3u8 in output_path.glob("*.m3u8"):
             content = m3u8.read_text(encoding="utf-8").splitlines(keepends=True)
             if not _is_master_playlist(content):
-                cnt = inject_markers_into_variant(m3u8, events)
+                cnt = inject_markers_into_variant(m3u8, events, asset_tags_map)
                 total += cnt
 
-    # Explicit subtitle playlist path (if not referenced in master yet)
     if subtitle_playlist_path:
         sub_path = Path(subtitle_playlist_path)
         if sub_path.exists():
             already_done = False
             if master:
                 content = master.read_text(encoding="utf-8").splitlines(keepends=True)
-                done_paths = [p for _, p in _find_subtitle_playlist_paths(content, output_path)]
-                already_done = sub_path.resolve() in done_paths
+                done = [p for _, p in _find_subtitle_playlist_paths(content, output_path)]
+                already_done = sub_path.resolve() in done
             if not already_done:
-                cnt = inject_markers_into_variant(sub_path, events)
+                cnt = inject_markers_into_variant(sub_path, events, asset_tags_map)
                 total += cnt
-                logging.info(f"  Injected {cnt} ESAM markers into subtitle playlist {sub_path.name}")
+                logging.info(f"  subtitle {sub_path.name}: {cnt} markers injected (explicit)")
 
     return total

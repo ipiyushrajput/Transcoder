@@ -81,13 +81,13 @@ function JobStartedDialog({ open, jobId, playbackUrl, onClose, onStop }) {
       </DialogContent>
       <DialogActions>
         <Button color="warning" startIcon={<StopIcon />} onClick={() => onStop(jobId)}>Stop Job</Button>
-        <Button variant="contained" onClick={onClose}>Close</Button>
+        <Button variant="contained" onClick={onClose}>Close &amp; View Jobs</Button>
       </DialogActions>
     </Dialog>
   )
 }
 
-export default function VODTranscoder() {
+export default function VODTranscoder({ onNavigateToJobs }) {
   const [input, setInput] = useState(DEFAULT_INPUT)
   const [output, setOutput] = useState(DEFAULT_OUTPUT)
   const [variants, setVariants] = useState([])
@@ -202,7 +202,7 @@ export default function VODTranscoder() {
           open={!!jobStarted}
           jobId={jobStarted.jobId}
           playbackUrl={jobStarted.playbackUrl}
-          onClose={() => setJobStarted(null)}
+          onClose={() => { setJobStarted(null); onNavigateToJobs && onNavigateToJobs() }}
           onStop={handleStop}
         />
       )}

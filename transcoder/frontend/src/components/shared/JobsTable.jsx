@@ -21,21 +21,6 @@ const STATUS_COLORS = {
   PENDING: 'default',
 }
 
-function useElapsed(startedAt, active) {
-  const [elapsed, setElapsed] = useState('')
-  useEffect(() => {
-    if (!active || !startedAt) { setElapsed(''); return }
-    const update = () => {
-      const diff = Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000)
-      const m = Math.floor(diff / 60), s = diff % 60
-      setElapsed(`${m}m ${s}s`)
-    }
-    update()
-    const t = setInterval(update, 1000)
-    return () => clearInterval(t)
-  }, [active, startedAt])
-  return elapsed
-}
 
 function LogsDialog({ open, jobId, jobStatus, onClose }) {
   const [logs, setLogs] = useState('')
@@ -58,9 +43,9 @@ function LogsDialog({ open, jobId, jobStatus, onClose }) {
     setLoading(true)
     fetchLogs().finally(() => setLoading(false))
 
-    // Auto-refresh every 3s for RUNNING jobs; stop once done
+    // Auto-refresh every 10s for RUNNING jobs; stop once done
     if (jobStatus === 'RUNNING') {
-      intervalRef.current = setInterval(fetchLogs, 3000)
+      intervalRef.current = setInterval(fetchLogs, 10000)
     }
     return () => clearInterval(intervalRef.current)
   }, [open, jobId, jobStatus, fetchLogs])
@@ -105,7 +90,7 @@ function LogsDialog({ open, jobId, jobStatus, onClose }) {
       <DialogActions>
         {jobStatus === 'RUNNING' && (
           <Typography variant="caption" color="text.secondary" sx={{ flex: 1, ml: 1 }}>
-            Auto-refreshing every 3s
+            Auto-refreshing every 10s
           </Typography>
         )}
         <Button onClick={onClose}>Close</Button>
@@ -211,18 +196,27 @@ function Detail({ label, value, truncate }) {
   )
 }
 
-function RunningCell({ startedAt }) {
-  const elapsed = useElapsed(startedAt, true)
+function RunningCell({ progressPct }) {
+  const pct = typeof progressPct === 'number' ? progressPct : 0
   return (
-    <Box>
-      <LinearProgress sx={{ height: 4, borderRadius: 2, mb: 0.5 }} />
-      <Typography variant="caption" color="text.secondary">{elapsed || '—'}</Typography>
+    <Box sx={{ minWidth: 110 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+        <LinearProgress
+          variant="determinate"
+          value={pct}
+          sx={{ flex: 1, height: 5, borderRadius: 2 }}
+        />
+        <Typography variant="caption" sx={{ fontWeight: 600, minWidth: 32, textAlign: 'right' }}>
+          {pct}%
+        </Typography>
+      </Box>
+      <Typography variant="caption" color="text.secondary">Encoding…</Typography>
     </Box>
   )
 }
 
-function CompletedCell({ completedAt, startedAt, status }) {
-  if (status === 'RUNNING') return <RunningCell startedAt={startedAt} />
+function CompletedCell({ completedAt, startedAt, status, progressPct }) {
+  if (status === 'RUNNING') return <RunningCell progressPct={progressPct} />
   if (!completedAt) return <Typography variant="caption" color="text.secondary">—</Typography>
   const d = new Date(completedAt)
   return (
@@ -270,7 +264,7 @@ export default function JobsTable() {
 
   useEffect(() => { fetchJobs() }, [fetchJobs])
   useEffect(() => {
-    const t = setInterval(fetchJobs, 5000)
+    const t = setInterval(fetchJobs, 3600000)
     return () => clearInterval(t)
   }, [fetchJobs])
 
@@ -396,7 +390,7 @@ export default function JobsTable() {
                     </Typography>
                   </TableCell>
                   <TableCell sx={{ minWidth: 130 }}>
-                    <CompletedCell completedAt={job.completed_at} startedAt={job.started_at} status={job.status} />
+                    <CompletedCell completedAt={job.completed_at} startedAt={job.started_at} status={job.status} progressPct={job.progress_pct} />
                   </TableCell>
                   <TableCell align="right">
                     <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>

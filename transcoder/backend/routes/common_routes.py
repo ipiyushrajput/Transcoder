@@ -141,11 +141,29 @@ def list_jobs():
         total = query.count()
         jobs = query.order_by(Job.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
 
+        job_list = []
+        for j in jobs:
+            d = _serialize_job(j)
+            if j.status == "RUNNING":
+                try:
+                    if j.type == "VOD":
+                        s = get_vod_job_status(j.job_id)
+                    else:
+                        s = get_live_channel_status(j.job_id)
+                    d["progress_pct"] = s.get("progress_pct", 0)
+                except Exception:
+                    d["progress_pct"] = 0
+            elif j.status == "COMPLETED":
+                d["progress_pct"] = 100
+            else:
+                d["progress_pct"] = None
+            job_list.append(d)
+
         return jsonify({
             "total": total,
             "page": page,
             "per_page": per_page,
-            "jobs": [_serialize_job(j) for j in jobs],
+            "jobs": job_list,
         }), 200
     except Exception as e:
         logging.error(f"List jobs error: {e}")

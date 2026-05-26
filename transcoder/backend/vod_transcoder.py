@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import shutil
 import logging
@@ -11,8 +12,9 @@ from pathlib import Path
 from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
-from esam_processor import parse_esam_scc_xml, process_esam_on_output
+from esam_processor import parse_esam_scc_xml, process_esam_on_output, parse_variant_segments
 from s3_uploader import build_s3_client, start_live_upload_watcher, upload_directory_to_s3
+from subtitle_processor import convert_subtitle_to_vtt, segment_vtt_for_hls
 
 # In-memory process registry
 _vod_processes = {}
@@ -34,6 +36,41 @@ def _get_fps(input_url: str) -> float:
     except Exception:
         pass
     return 25.0
+
+
+def _get_input_duration(input_url: str) -> float:
+    """Return duration of input in seconds using ffprobe. Returns 0.0 on failure."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", input_url],
+            capture_output=True, text=True, timeout=20,
+        )
+        val = result.stdout.strip()
+        if val:
+            return float(val)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _parse_ffmpeg_progress(log_path: str, total_duration: float) -> int:
+    """Parse FFmpeg log for the latest 'time=HH:MM:SS.FF'. Returns 0-99 percent."""
+    if not total_duration or total_duration <= 0:
+        return 0
+    try:
+        with open(log_path, "r", errors="replace") as f:
+            content = f.read()
+        matches = re.findall(r"time=(\d+:\d+:\d+\.\d+)", content)
+        if not matches:
+            return 0
+        parts = matches[-1].split(":")
+        elapsed = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        pct = int(elapsed / total_duration * 100)
+        return max(0, min(pct, 99))
+    except Exception:
+        return 0
 
 
 def _timecode_to_seconds(tc: str, fps: float) -> float:
@@ -63,40 +100,25 @@ def _build_input_clipping_ffconcat(input_url: str, clips: list, fps: float, tmp_
     return concat_path
 
 
-def _process_subtitles(ffmpeg_path: str, subtitle_url: str, output_dir: str, lang: str = "en", segment_size: int = 6) -> Optional[str]:
-    """Generate HLS subtitle playlist from subtitle file, aligned to segment_size. Returns playlist path or None."""
-    if not subtitle_url:
-        return None
-
-    playlist_name = f"sub_{lang}.m3u8"
-    segment_pattern = f"sub_{lang}_%05d.vtt"
-    playlist_path = os.path.join(output_dir, playlist_name)
-    segment_path = os.path.join(output_dir, segment_pattern)
-
-    cmd = [
-        ffmpeg_path, "-y",
-        "-i", subtitle_url,
-        "-map", "0:0",
-        "-c:s", "webvtt",
-        "-f", "segment",
-        "-segment_time", str(segment_size),
-        "-segment_list_type", "m3u8",
-        "-hls_playlist_type", "vod",
-        "-segment_list", playlist_path,
-        "-segment_format", "webvtt",
-        segment_path,
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            logging.error(f"Subtitle processing failed (rc={result.returncode}): {result.stderr[-500:]}")
-            return None
-        logging.info(f"Subtitle HLS generated: {playlist_path} (segment={segment_size}s)")
-        return playlist_path
-    except Exception as e:
-        logging.error(f"Subtitle processing failed: {e}")
-        return None
+def _compute_clip_boundaries(clips: list, fps: float) -> tuple:
+    """
+    Compute (clip_boundary_times, total_output_duration) for force_key_frames.
+    Boundaries are the transition points in the output timeline (excluding 0).
+    """
+    boundary_times = []
+    cumulative = 0.0
+    for clip in clips:
+        start = _timecode_to_seconds(clip["start_timecode"], fps)
+        end = _timecode_to_seconds(clip["end_timecode"], fps)
+        dur = max(0.0, end - start)
+        cumulative += dur
+        boundary_times.append(round(cumulative, 3))
+    # Last boundary is the total duration, not a transition; drop it
+    if boundary_times:
+        total = boundary_times.pop()
+    else:
+        total = 0.0
+    return boundary_times, total
 
 
 def _update_master_for_subtitles(master_path: str, lang: str = "en"):
@@ -108,34 +130,28 @@ def _update_master_for_subtitles(master_path: str, lang: str = "en"):
     with open(master_path, "r") as f:
         lines = f.readlines()
 
-    has_sub_media = any("#EXT-X-MEDIA:TYPE=SUBTITLES" in l for l in lines)
     has_sub_attr = any('SUBTITLES="subs"' in l for l in lines)
-
-    new_lines = []
-    has_version = any("#EXT-X-VERSION" in l for l in lines)
-    has_extm3u = any("#EXTM3U" in l.strip() for l in lines)
-
-    new_lines.append("#EXTM3U\n")
-    new_lines.append("#EXT-X-VERSION:3\n")
-    new_lines.append("#EXT-X-INDEPENDENT-SEGMENTS\n")
-
+    new_lines = [
+        "#EXTM3U\n",
+        "#EXT-X-VERSION:3\n",
+        "#EXT-X-INDEPENDENT-SEGMENTS\n",
+    ]
     for line in lines:
         stripped = line.strip()
-        if stripped == "#EXTM3U" or stripped.startswith("#EXT-X-VERSION:") or stripped == "#EXT-X-INDEPENDENT-SEGMENTS":
+        if stripped in ("#EXTM3U",) or stripped.startswith("#EXT-X-VERSION:") or stripped == "#EXT-X-INDEPENDENT-SEGMENTS":
             continue
         if line.startswith("#EXT-X-STREAM-INF") and not has_sub_attr:
             new_lines.append(line.rstrip() + ',SUBTITLES="subs"\n')
-        elif line.startswith("#EXT-X-MEDIA:TYPE=SUBTITLES"):
+        elif "TYPE=SUBTITLES" in line:
             continue
         else:
             new_lines.append(line)
 
-    if not has_sub_media:
-        sub_tag = (
-            f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",'
-            f'DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,LANGUAGE="{lang}",URI="{sub_playlist}"\n'
-        )
-        new_lines.append(sub_tag)
+    sub_tag = (
+        f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",'
+        f'DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,LANGUAGE="{lang}",URI="{sub_playlist}"\n'
+    )
+    new_lines.append(sub_tag)
 
     with open(master_path, "w") as f:
         f.writelines(new_lines)
@@ -154,49 +170,61 @@ def build_vod_ffmpeg_command(
     ffmpeg_path: str = "ffmpeg",
     use_concat: bool = False,
     deinterlace: bool = True,
+    clip_boundary_times: list = None,
+    total_output_duration: float = 0.0,
 ) -> List[str]:
-    """Build ffmpeg command for multi-bitrate HLS output."""
+    """Build FFmpeg command for multi-bitrate HLS output."""
     num = len(variants)
     split_labels = [f"[v{i}]" for i in range(num)]
 
-    # filter_complex: split video + optional deinterlace + scale each variant + split audio
     filter_parts = [f"[0:v]split={num}{''.join(split_labels)}"]
     for i, v in enumerate(variants):
         w, h = v["width"], v["height"]
-        # yadif with deint=1 only processes frames flagged as interlaced; safe for progressive sources
         deint_filter = "yadif=mode=0:parity=auto:deint=1," if deinterlace else ""
-        scale_filter = f"{deint_filter}scale=w={w}:h={h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"
+        scale_filter = (
+            f"{deint_filter}scale=w={w}:h={h}:force_original_aspect_ratio=decrease,"
+            f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"
+        )
         filter_parts.append(f"[v{i}]{scale_filter}[v{i}out]")
 
-    # For ffconcat inputs, add aresample to prevent audio overlap at clip boundaries
     if use_concat:
         filter_parts.append(f"[0:a]aresample=async=1000[a_resampled]")
-        filter_parts.append(
-            f"[a_resampled]asplit={num}{''.join(f'[a{i}out]' for i in range(num))}"
-        )
+        filter_parts.append(f"[a_resampled]asplit={num}{''.join(f'[a{i}out]' for i in range(num))}")
     else:
-        filter_parts.append(
-            f"[0:a]asplit={num}{''.join(f'[a{i}out]' for i in range(num))}"
-        )
+        filter_parts.append(f"[0:a]asplit={num}{''.join(f'[a{i}out]' for i in range(num))}")
 
     filter_complex = "; ".join(filter_parts)
 
-    cmd = [ffmpeg_path, "-y", "-hide_banner"]
+    cmd = [ffmpeg_path, "-y", "-hide_banner", "-thread_queue_size", "1024"]
 
     if use_concat:
         cmd.extend(["-safe", "0"])
-        # Required when ffconcat entries reference http/https URLs
         cmd.extend(["-protocol_whitelist", "file,http,https,tcp,tls,crypto"])
-        # Regenerate timestamps to avoid audio drift at clip boundaries
         cmd.extend(["-fflags", "+genpts"])
+
     cmd.extend(["-i", input_path])
     cmd.extend(["-filter_complex", filter_complex])
+
+    # Build force_key_frames expression
+    # For clipped content, use an explicit keyframe list to get short EXTINF at boundaries
+    if clip_boundary_times:
+        kf_times = set()
+        # Regular interval keyframes (cover full output duration + a buffer)
+        max_t = (total_output_duration if total_output_duration > 0 else 7200) + segment_size * 2
+        t = 0.0
+        while t <= max_t:
+            kf_times.add(round(t, 3))
+            t += segment_size
+        kf_times.update(clip_boundary_times)
+        kf_str = ",".join(str(k) for k in sorted(kf_times))
+        force_kf_expr = kf_str
+    else:
+        force_kf_expr = f"expr:gte(t,n_forced*{segment_size})"
 
     for i, v in enumerate(variants):
         codec = v.get("video_codec", "libx264")
         bitrate = v.get("video_bitrate", 2000000)
         framerate = v.get("framerate", "25")
-        gop = int(v.get("gop", 60))
         ref = int(v.get("reference_frames", 4))
         profile = v.get("profile", "main")
         level = v.get("level", "4.1")
@@ -205,8 +233,6 @@ def build_vod_ffmpeg_command(
         sample_rate = v.get("sample_rate", 48000)
 
         cmd.extend(["-map", f"[v{i}out]", "-map", f"[a{i}out]"])
-
-        # Video codec settings
         cmd.extend([f"-c:v:{i}", codec])
 
         if codec == "libx264":
@@ -233,25 +259,21 @@ def build_vod_ffmpeg_command(
             f"-b:v:{i}", str(bitrate),
             f"-r:v:{i}", str(framerate),
             f"-preset:v:{i}", preset,
-            f"-force_key_frames:v:{i}", f"expr:gte(t,n_forced*{segment_size})",
+            f"-force_key_frames:v:{i}", force_kf_expr,
             f"-pix_fmt:v:{i}", "yuv420p",
         ])
-
-        # Audio settings
         cmd.extend([
             f"-c:a:{i}", audio_codec,
             f"-b:a:{i}", str(audio_bitrate),
             f"-ar:a:{i}", str(sample_rate),
         ])
 
-    # var_stream_map
     stream_map_entries = [
         f"v:{i},a:{i},name:{v.get('height', 'v' + str(i))}p"
         for i, v in enumerate(variants)
     ]
     cmd.extend(["-var_stream_map", " ".join(stream_map_entries)])
 
-    # HLS output settings
     segment_filename = os.path.join(output_dir, "segment_%v_%05d.ts")
     variant_playlist = os.path.join(output_dir, "variant_%v.m3u8")
 
@@ -283,9 +305,9 @@ def build_mp4_output_command(
     ffmpeg_path: str = "ffmpeg",
     use_concat: bool = False,
 ) -> List[str]:
-    """Build ffmpeg command for single MP4 output (highest quality variant)."""
-    v = variants[0]  # Use first/highest variant for MP4 output
-    cmd = [ffmpeg_path, "-y", "-hide_banner"]
+    """Build FFmpeg command for single MP4 output (highest quality variant)."""
+    v = variants[0]
+    cmd = [ffmpeg_path, "-y", "-hide_banner", "-thread_queue_size", "1024"]
     if use_concat:
         cmd.extend(["-safe", "0"])
     cmd.extend(["-i", input_path])
@@ -306,12 +328,6 @@ def build_mp4_output_command(
 def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
     """
     Start a VOD transcoding job. Returns dict with job_id and status.
-    job_config keys:
-        job_id, name, input_url, input_type, clips, subtitle_url, subtitle_language,
-        output_type (HLS/MP4), output_destination (S3/LOCAL),
-        s3_bucket, s3_path, s3_cloudfront_domain, local_path,
-        master_filename, segment_length, hls_playlist_type, hls_flags, hls_list_size,
-        preset, variants, esam_enabled, esam_scc_xml
     """
     job_id = job_config.get("job_id") or str(uuid.uuid4())
     name = job_config.get("name", job_id)
@@ -319,11 +335,8 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
 
     logging.info(f"[VOD:{name}] Starting job {job_id}")
 
-    # Create temp working dir (used for ffconcat manifests and log files)
     tmp_dir = tempfile.mkdtemp(prefix=f"vod_{job_id[:8]}_")
 
-    # When destination is LOCAL and a path is given, write directly there;
-    # otherwise use a sub-dir of tmp_dir (for S3 / other destinations).
     dest = job_config.get("output_destination", "LOCAL").upper()
     _local_path = job_config.get("local_path", "").strip()
     if dest == "LOCAL" and _local_path:
@@ -335,8 +348,12 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
     input_url = job_config["input_url"]
     clips = job_config.get("clips", [])
     use_concat = False
+    clip_boundary_times = []
+    total_output_duration = 0.0
 
-    # Handle input clipping
+    # Get input duration for progress tracking
+    input_duration = _get_input_duration(input_url)
+
     if clips:
         fps = _get_fps(input_url)
         try:
@@ -344,9 +361,13 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
             input_url = ffconcat_path
             use_concat = True
             logging.info(f"[VOD:{name}] Using ffconcat for {len(clips)} clip(s)")
+            clip_boundary_times, total_output_duration = _compute_clip_boundaries(clips, fps)
+            logging.info(f"[VOD:{name}] Clip boundaries at: {clip_boundary_times}, total={total_output_duration:.3f}s")
         except Exception as e:
             logging.error(f"[VOD:{name}] Clip processing failed: {e}")
             return {"success": False, "error": str(e)}
+    else:
+        total_output_duration = input_duration
 
     variants = job_config.get("variants", [])
     if not variants:
@@ -357,14 +378,16 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
     master_filename = job_config.get("master_filename", "master")
     preset = job_config.get("preset", "medium")
 
-    # Process subtitles (segment_size must match video variants for EXTINF alignment)
+    # Pre-encode subtitle conversion (just format conversion, not segmentation)
     sub_url = job_config.get("subtitle_url")
     sub_lang = job_config.get("subtitle_language", "en")
-    sub_playlist = None
-    if sub_url:
-        sub_playlist = _process_subtitles(ffmpeg_path, sub_url, output_dir, sub_lang, segment_size)
+    sub_vtt_path = None
+    if sub_url and output_type == "HLS":
+        sub_vtt_path = os.path.join(tmp_dir, f"subtitle_{sub_lang}.vtt")
+        if not convert_subtitle_to_vtt(ffmpeg_path, sub_url, sub_vtt_path):
+            sub_vtt_path = None
+            logging.warning(f"[VOD:{name}] Subtitle conversion failed, proceeding without subtitles")
 
-    # Build FFmpeg command
     if output_type == "HLS":
         ffmpeg_cmd = build_vod_ffmpeg_command(
             input_path=input_url,
@@ -378,6 +401,8 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
             hls_list_size=job_config.get("hls_list_size", 0),
             ffmpeg_path=ffmpeg_path,
             use_concat=use_concat,
+            clip_boundary_times=clip_boundary_times,
+            total_output_duration=total_output_duration,
         )
     else:
         output_file = os.path.join(output_dir, f"{master_filename}.mp4")
@@ -393,7 +418,6 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
     log_path = os.path.join(tmp_dir, "ffmpeg.log")
     logging.info(f"[VOD:{name}] FFmpeg cmd: {' '.join(ffmpeg_cmd)}")
 
-    # Start S3 watcher if destination is S3
     observer = handler = periodic = None
     s3_client = None
     if dest == "S3":
@@ -406,11 +430,7 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
             logging.error(f"[VOD:{name}] S3 watcher failed: {e}")
 
     with open(log_path, "w") as log_f:
-        process = subprocess.Popen(
-            ffmpeg_cmd,
-            stdout=log_f,
-            stderr=log_f,
-        )
+        process = subprocess.Popen(ffmpeg_cmd, stdout=log_f, stderr=log_f)
 
     lock = threading.Lock()
     _vod_locks[job_id] = lock
@@ -426,10 +446,12 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
         "s3_client": s3_client,
         "started_at": datetime.utcnow().isoformat(),
         "status": "RUNNING",
-        "sub_playlist": sub_playlist,
+        "sub_vtt_path": sub_vtt_path,
         "sub_lang": sub_lang,
         "master_filename": master_filename,
         "output_type": output_type,
+        "total_output_duration": total_output_duration,
+        "ffmpeg_path": ffmpeg_path,
     }
 
     if db_update_callback:
@@ -456,8 +478,7 @@ def _build_playback_url(job_config: dict) -> str:
         if cf:
             return f"{cf}/{s3_path}/{master}.m3u8"
         bucket = job_config.get("s3_bucket", "")
-        region = "us-east-1"
-        return f"https://{bucket}.s3.{region}.amazonaws.com/{s3_path}/{master}.m3u8"
+        return f"https://{bucket}.s3.us-east-1.amazonaws.com/{s3_path}/{master}.m3u8"
     elif dest == "MEDIAPACKAGE":
         return job_config.get("mediapackage_url", "")
     else:
@@ -466,7 +487,7 @@ def _build_playback_url(job_config: dict) -> str:
 
 
 def _monitor_vod_process(job_id: str, db_update_callback=None):
-    """Monitor VOD ffmpeg process completion and trigger post-processing."""
+    """Monitor VOD FFmpeg process and handle post-encode tasks."""
     pinfo = _vod_processes.get(job_id)
     if not pinfo:
         return
@@ -497,29 +518,44 @@ def _monitor_vod_process(job_id: str, db_update_callback=None):
         job_config = pinfo["job_config"]
         master_filename = pinfo["master_filename"]
         output_type = pinfo["output_type"]
-        sub_playlist = pinfo.get("sub_playlist")
+        sub_vtt_path = pinfo.get("sub_vtt_path")
         sub_lang = pinfo.get("sub_lang", "en")
+        ffmpeg_path = pinfo.get("ffmpeg_path", "ffmpeg")
 
-        # Stop S3 watchers
         _stop_watchers(pinfo)
 
         if returncode == 0:
             logging.info(f"[VOD:{name}] FFmpeg completed successfully")
             status = "COMPLETED"
+            sub_playlist = None
 
-            # Post-processing: update master playlist with subtitle refs
+            # Post-encode subtitle segmentation aligned to video segments
+            if sub_vtt_path and output_type == "HLS":
+                vtt_path = Path(sub_vtt_path)
+                if vtt_path.exists():
+                    variant_files = sorted(Path(output_dir).glob("variant_*.m3u8"))
+                    if variant_files:
+                        try:
+                            _, v_segments, _ = parse_variant_segments(variant_files[0])
+                            if v_segments:
+                                sub_playlist = segment_vtt_for_hls(vtt_path, v_segments, output_dir, sub_lang)
+                                logging.info(f"[VOD:{name}] Subtitle segmented: {sub_playlist}")
+                        except Exception as e:
+                            logging.error(f"[VOD:{name}] Subtitle segmentation failed: {e}")
+
             if sub_playlist and output_type == "HLS":
                 master_path = os.path.join(output_dir, f"{master_filename}.m3u8")
                 _update_master_for_subtitles(master_path, sub_lang)
 
-            # Post-processing: ESAM injection into video variants and subtitle playlist
+            # ESAM injection
             if job_config.get("esam_enabled") and job_config.get("esam_scc_xml"):
                 events = parse_esam_scc_xml(job_config["esam_scc_xml"])
+                mcc_xml = job_config.get("esam_mcc_xml")
                 if events and output_type == "HLS":
-                    cnt = process_esam_on_output(output_dir, events, sub_playlist)
+                    cnt = process_esam_on_output(output_dir, events, sub_playlist, mcc_xml=mcc_xml)
                     logging.info(f"[VOD:{name}] Injected {cnt} ESAM markers")
 
-            # Final S3 upload (batch)
+            # Upload to S3
             dest = job_config.get("output_destination", "LOCAL").upper()
             if dest == "S3":
                 bucket = job_config.get("s3_bucket", "")
@@ -533,12 +569,10 @@ def _monitor_vod_process(job_id: str, db_update_callback=None):
             elif dest == "LOCAL":
                 local_path = job_config.get("local_path", "")
                 if local_path:
-                    logging.info(f"[VOD:{name}] Output written directly to {local_path}")
+                    logging.info(f"[VOD:{name}] Output at {local_path}")
         else:
             logging.error(f"[VOD:{name}] FFmpeg failed (rc={returncode})")
             status = "FAILED"
-
-            # Read error from log
             error_msg = ""
             try:
                 with open(pinfo["log_path"], "r") as f:
@@ -554,7 +588,6 @@ def _monitor_vod_process(job_id: str, db_update_callback=None):
         if db_update_callback:
             db_update_callback(job_id, status, None, error_to_save)
 
-        # Cleanup temp dir
         try:
             shutil.rmtree(pinfo["tmp_dir"], ignore_errors=True)
         except Exception:
@@ -590,7 +623,6 @@ def stop_vod_job(job_id: str, db_update_callback=None) -> dict:
 
         process = pinfo["process"]
         name = pinfo["job_config"].get("name", job_id)
-
         _stop_watchers(pinfo)
 
         try:
@@ -620,23 +652,32 @@ def stop_vod_job(job_id: str, db_update_callback=None) -> dict:
 
 
 def get_vod_job_status(job_id: str) -> dict:
-    """Get current status of a VOD job."""
+    """Get current status and progress of a VOD job."""
     pinfo = _vod_processes.get(job_id)
     if not pinfo:
         return {"job_id": job_id, "status": "NOT_FOUND"}
 
     process = pinfo["process"]
     returncode = process.poll()
-
     status = pinfo.get("status", "RUNNING")
     if returncode is not None and status == "RUNNING":
         status = "COMPLETED" if returncode == 0 else "FAILED"
+
+    progress_pct = 0
+    if status == "RUNNING":
+        log_path = pinfo.get("log_path", "")
+        total_dur = pinfo.get("total_output_duration", 0.0)
+        if log_path and os.path.exists(log_path) and total_dur > 0:
+            progress_pct = _parse_ffmpeg_progress(log_path, total_dur)
+    elif status == "COMPLETED":
+        progress_pct = 100
 
     return {
         "job_id": job_id,
         "status": status,
         "started_at": pinfo.get("started_at"),
         "pid": process.pid if process else None,
+        "progress_pct": progress_pct,
     }
 
 

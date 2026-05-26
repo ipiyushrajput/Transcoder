@@ -10,7 +10,7 @@ import LiveTranscoder from './Live/LiveTranscoder'
 import JobsTable from './shared/JobsTable'
 
 export default function TranscoderPage() {
-  const [tab, setTab] = useState(0)
+  const [tab, setTab] = useState(2)
 
   return (
     <Box sx={{ minHeight: '100vh', bgcolor: 'background.default' }}>
@@ -44,8 +44,8 @@ export default function TranscoderPage() {
       </AppBar>
 
       <Container maxWidth="xl" sx={{ py: 3 }}>
-        {tab === 0 && <VODTranscoder />}
-        {tab === 1 && <LiveTranscoder />}
+        {tab === 0 && <VODTranscoder onNavigateToJobs={() => setTab(2)} />}
+        {tab === 1 && <LiveTranscoder onNavigateToJobs={() => setTab(2)} />}
         {tab === 2 && <JobsTable />}
       </Container>
     </Box>
