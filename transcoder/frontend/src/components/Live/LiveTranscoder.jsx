@@ -63,13 +63,13 @@ function ChannelRunningDialog({ open, channelId, playbackUrl, onClose, onStop })
         <Button color="error" variant="contained" startIcon={<StopIcon />} onClick={() => onStop(channelId)}>
           Stop Channel
         </Button>
-        <Button variant="outlined" onClick={onClose}>Close Dialog</Button>
+        <Button variant="outlined" onClick={onClose}>Close &amp; View Jobs</Button>
       </DialogActions>
     </Dialog>
   )
 }
 
-export default function LiveTranscoder() {
+export default function LiveTranscoder({ onNavigateToJobs }) {
   const [input, setInput] = useState(DEFAULT_INPUT)
   const [output, setOutput] = useState(DEFAULT_OUTPUT)
   const [variants, setVariants] = useState([])
@@ -196,7 +196,7 @@ export default function LiveTranscoder() {
           open={!!channelRunning}
           channelId={channelRunning.channelId}
           playbackUrl={channelRunning.playbackUrl}
-          onClose={() => setChannelRunning(null)}
+          onClose={() => { setChannelRunning(null); onNavigateToJobs && onNavigateToJobs() }}
           onStop={handleStop}
         />
       )}

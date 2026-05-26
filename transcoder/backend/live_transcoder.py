@@ -386,6 +386,7 @@ def get_live_channel_status(channel_id: str) -> dict:
         "status": pinfo.get("status", "RUNNING"),
         "started_at": pinfo.get("started_at"),
         "pid": pinfo["process"].pid if pinfo.get("process") else None,
+        "progress_pct": 0,  # Live streams have no known end
     }
 
 
