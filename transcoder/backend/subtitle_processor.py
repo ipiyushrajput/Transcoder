@@ -118,9 +118,16 @@ def segment_vtt_for_hls(merged_cues: List[Tuple[float, float, str]],
                         video_segments: List[Tuple[float, float, str, int]],
                         output_dir: str,
                         lang: str = "en",
-                        start_number: int = 1) -> Optional[str]:
+                        start_number: int = 1,
+                        mpegts_base_90k: int = 126000) -> Optional[str]:
     """Write one VTT per video segment (aligned to video segment durations) and
     a matching HLS playlist. Returns the playlist path.
+
+    Each VTT carries an X-TIMESTAMP-MAP so the cue times sync to the video PTS:
+      MPEGTS = mpegts_base_90k + round(seg_start * 90000)
+      LOCAL  = 00:00:00.000      (cue times are relative to the segment start)
+    Without this header players show subtitles only at the start and then drop
+    them — which is the desync the reference fixes.
     """
     if not video_segments:
         logging.error("No video segments for subtitle alignment")
@@ -138,15 +145,14 @@ def segment_vtt_for_hls(merged_cues: List[Tuple[float, float, str]],
         out_filename = f"sub_{lang}_{seg_num:05d}.vtt"
         out_filepath = output_path / out_filename
 
-        body = ["WEBVTT\n\n"]
-        n = 0
+        mpegts = mpegts_base_90k + int(round(seg_start * 90000))
+        body = [f"WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:{mpegts}\n\n"]
         for (cstart, cend, ctext) in merged_cues:
             if cstart < seg_end and cend > seg_start:
                 rel_start = max(cstart - seg_start, 0.0)
                 rel_end = min(cend - seg_start, seg_dur)
                 if rel_end > rel_start:
-                    n += 1
-                    body.append(f"{n}\n{_format_vtt_time(rel_start)} --> {_format_vtt_time(rel_end)}\n{ctext}\n\n")
+                    body.append(f"{_format_vtt_time(rel_start)} --> {_format_vtt_time(rel_end)}\n{ctext}\n\n")
         out_filepath.write_text("".join(body), encoding="utf-8")
         extinf_values.append(seg_dur)
         seg_filenames.append(out_filename)
