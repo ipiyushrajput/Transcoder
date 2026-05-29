@@ -153,15 +153,23 @@ def _build_clip_command(input_url: str, clip_idx: int, start_sec: float, end_sec
 
         cmd += ["-map", f"[v{i}out]", "-an"]
         cmd += ["-c:v", codec]
+        # keyint=gop, scenecut=0  -> keyframes ONLY at the forced GOP positions
+        #   (no scene-cut IDRs) so copy-segmentation yields uniform segments.
+        # repeat-headers=1        -> SPS/PPS before every IDR, so each TS segment
+        #   is independently decodable (fixes "non-existing SPS 0").
+        # open-gop=0              -> closed GOPs for clean HLS splits.
+        gop_struct = f"keyint={gop_frames}:min-keyint=1:scenecut=0:open-gop=0:repeat-headers=1"
         if codec == "libx264":
             cmd += ["-x264-params",
                     f"rc-lookahead=32:bframes=3:ref={ref}:nal-hrd=cbr:"
-                    f"bitrate={bitrate // 1000}:vbv-maxrate={bitrate // 1000}:vbv-bufsize={bitrate // 500}",
+                    f"bitrate={bitrate // 1000}:vbv-maxrate={bitrate // 1000}:vbv-bufsize={bitrate // 500}:"
+                    f"{gop_struct}",
                     "-profile:v", profile, "-level:v", level]
         elif codec == "libx265":
             cmd += ["-x265-params",
                     f"rc-lookahead=32:bframes=3:ref={ref}:"
-                    f"vbv-maxrate={bitrate // 1000}:vbv-bufsize={bitrate // 500}",
+                    f"vbv-maxrate={bitrate // 1000}:vbv-bufsize={bitrate // 500}:"
+                    f"{gop_struct}",
                     "-tag:v", "hvc1"]
         cmd += [
             "-b:v", str(bitrate),
@@ -202,28 +210,123 @@ def _build_concat_merge_command(clip_paths: list, out_path: str, tmp_dir: str,
     ]
 
 
-def _build_hls_command(merged_video: str, merged_audio: Optional[str], name: str,
-                       output_dir: str, segment_size: int, hls_playlist_type: str,
-                       hls_flags: str, ffmpeg_path: str) -> list:
-    """Segment a merged variant with -c copy. Splits land on the keyframes laid
-    down during the per-clip encode -> uniform GOP segments + short segments at
-    clip boundaries (matching the reference)."""
+def _compute_segment_times(clips_sec: list, fps: Fraction, gop_frames: int,
+                           use_open_ended: bool, total_duration: float) -> Tuple[list, float]:
+    """Compute explicit segment-cut times on the compacted output timeline.
+
+    Cuts are placed at:
+      * every clip boundary (so an ad break lands exactly between clips), and
+      * the per-clip GOP grid (clip_start + offset + k*gop_dur),
+    which are exactly the keyframes the per-clip encode produced. Feeding these
+    to the `segment` muxer with -c copy reproduces the reference layout: uniform
+    GOP segments plus short segments at the clip in/out points.
+
+    Returns (sorted_unique_times, total_output_duration).
+    """
+    gop_dur = gop_frames / float(fps)
+    clips = [(0.0, total_duration)] if use_open_ended else list(clips_sec)
+    times = []
+    cum = 0.0
+    for (cs, ce) in clips:
+        D = (ce - cs) if not use_open_ended else total_duration
+        if D <= 0:
+            continue
+        O = _clip_gop_offset_seconds(cs, fps, gop_frames)
+        if cum > 0.001:
+            times.append(round(cum, 6))  # clip boundary cut
+        t = O if O > 0.001 else gop_dur
+        while t < D - 0.001:
+            times.append(round(cum + t, 6))
+            t += gop_dur
+        cum += D
+
+    # Dedupe within a frame tolerance, keep sorted.
+    times.sort()
+    deduped = []
+    for t in times:
+        if not deduped or (t - deduped[-1]) > (0.5 / float(fps)):
+            deduped.append(t)
+    return deduped, cum
+
+
+def _build_segment_command(merged_video: str, merged_audio: Optional[str], name: str,
+                           output_dir: str, segment_times: list, ffmpeg_path: str) -> list:
+    """Segment a merged variant at EXACT times with -c copy via the segment muxer
+    (the stock-FFmpeg equivalent of the reference's -hls_force_times)."""
     cmd = [ffmpeg_path, "-y", "-hide_banner", "-i", merged_video]
     if merged_audio and os.path.exists(merged_audio):
         cmd += ["-i", merged_audio, "-map", "0:v:0", "-c:v", "copy", "-map", "1:a:0", "-c:a", "copy"]
     else:
         cmd += ["-map", "0:v:0", "-c:v", "copy", "-an"]
+    times_str = ",".join(f"{t:.6f}" for t in segment_times)
     cmd += [
-        "-f", "hls",
-        "-start_number", "1",
-        "-hls_time", str(segment_size),
-        "-hls_playlist_type", hls_playlist_type or "vod",
-        "-hls_flags", hls_flags or "independent_segments",
-        "-hls_segment_type", "mpegts",
-        "-hls_segment_filename", os.path.join(output_dir, f"segment_{name}_%05d.ts"),
-        os.path.join(output_dir, f"variant_{name}.m3u8"),
+        "-f", "segment",
+        "-segment_times", times_str,
+        "-segment_time_delta", "0.05",
+        "-segment_format", "mpegts",
+        "-segment_list", os.path.join(output_dir, f"variant_{name}.m3u8"),
+        "-segment_list_type", "m3u8",
+        "-segment_start_number", "1",
+        "-break_non_keyframes", "0",
+        os.path.join(output_dir, f"segment_{name}_%05d.ts"),
     ]
     return cmd
+
+
+def _normalize_variant_playlist(playlist_path: str) -> Optional[list]:
+    """Rewrite a segment-muxer playlist with proper HLS headers (VERSION:6,
+    TARGETDURATION, MEDIA-SEQUENCE:1, PLAYLIST-TYPE:VOD, INDEPENDENT-SEGMENTS)
+    and basename segment URIs. Returns the (extinf, name) pairs."""
+    p = Path(playlist_path)
+    if not p.exists():
+        return None
+    raw = p.read_text(encoding="utf-8").splitlines()
+    pairs = []
+    i = 0
+    while i < len(raw):
+        ln = raw[i].strip()
+        if ln.startswith("#EXTINF:"):
+            try:
+                dur = float(ln.split(":", 1)[1].split(",", 1)[0])
+            except (ValueError, IndexError):
+                dur = 0.0
+            if i + 1 < len(raw) and raw[i + 1].strip():
+                pairs.append((dur, os.path.basename(raw[i + 1].strip())))
+            i += 2
+        else:
+            i += 1
+    if not pairs:
+        return None
+    import math as _math
+    targetduration = max(1, _math.ceil(max(d for d, _ in pairs)))
+    out = [
+        "#EXTM3U\n", "#EXT-X-VERSION:6\n",
+        f"#EXT-X-TARGETDURATION:{targetduration}\n",
+        "#EXT-X-MEDIA-SEQUENCE:1\n", "#EXT-X-PLAYLIST-TYPE:VOD\n",
+        "#EXT-X-INDEPENDENT-SEGMENTS\n",
+    ]
+    for dur, fname in pairs:
+        out.append(f"#EXTINF:{dur:.6f},\n{fname}\n")
+    out.append("#EXT-X-ENDLIST\n")
+    p.write_text("".join(out), encoding="utf-8")
+    return pairs
+
+
+def _get_first_pts_90k(ffprobe_path: str, segment_path: str) -> int:
+    """Return the first video packet PTS of a TS segment in 90kHz units, for the
+    subtitle X-TIMESTAMP-MAP. Falls back to ffmpeg's default mpegts start."""
+    try:
+        result = subprocess.run(
+            [ffprobe_path, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "packet=pts_time", "-of", "csv=p=0", segment_path],
+            capture_output=True, text=True, timeout=20)
+        for line in result.stdout.splitlines():
+            line = line.strip().strip(",")
+            if line:
+                return int(round(float(line) * 90000))
+    except Exception:
+        pass
+    return 126000  # ffmpeg mpegts default initial PTS (~1.4s)
 
 
 # ----------------------------------------------------------------------------
@@ -568,8 +671,13 @@ def _run_hls_pipeline(pinfo, job_config, input_url, variants, clips_sec, fps, go
             if rc != 0:
                 raise RuntimeError(f"Audio merge failed (rc={rc})")
 
-    # 3) HLS-segment each merged variant with -c copy.
+    # 3) Segment each merged variant at EXACT computed times (segment muxer +
+    #    -c copy). Cuts land on the keyframes we forced during encode -> uniform
+    #    6.006s segments + short segments only at clip in/out points.
     pinfo["progress_pct"] = 66
+    segment_times, _total = _compute_segment_times(
+        clips_sec, fps, gop_frames, use_open_ended, total_output_duration)
+    logging.info(f"[VOD:{name}] {len(segment_times)} segment-cut times computed")
     n = len(variants)
     for vi, v in enumerate(variants):
         if pinfo.get("cancel"):
@@ -577,14 +685,15 @@ def _run_hls_pipeline(pinfo, job_config, input_url, variants, clips_sec, fps, go
         vname = f"{v.get('height', 0)}p"
         if vname not in merged_video:
             continue
-        cmd = _build_hls_command(merged_video[vname], merged_audio, vname, output_dir,
-                                 segment_size, hls_playlist_type, hls_flags, ffmpeg_path)
+        cmd = _build_segment_command(merged_video[vname], merged_audio, vname,
+                                     output_dir, segment_times, ffmpeg_path)
         base = 66 + int(vi / n * 20)
         rc = _run_ffmpeg(cmd, log_path, pinfo, base, max(1, int(20 / n)), 0)
         if rc == -1:
             return
         if rc != 0:
-            raise RuntimeError(f"HLS segmentation failed for {vname} (rc={rc})")
+            raise RuntimeError(f"Segmentation failed for {vname} (rc={rc})")
+        _normalize_variant_playlist(os.path.join(output_dir, f"variant_{vname}.m3u8"))
 
     # 4) Reference video segments come from the top (first) variant playlist.
     pinfo["progress_pct"] = 88
@@ -594,8 +703,16 @@ def _run_hls_pipeline(pinfo, job_config, input_url, variants, clips_sec, fps, go
     if top_playlist.exists():
         _, video_segments, _ = parse_variant_segments(top_playlist)
 
+    # MPEGTS base (first video packet PTS) for the subtitle X-TIMESTAMP-MAP.
+    mpegts_base = 126000
+    if video_segments:
+        first_ts = os.path.join(output_dir, video_segments[0][2])
+        if os.path.exists(first_ts):
+            mpegts_base = _get_first_pts_90k("ffprobe", first_ts)
+    logging.info(f"[VOD:{name}] subtitle MPEGTS base = {mpegts_base}")
+
     # 5) Subtitles: convert -> parse -> clip/offset onto compacted timeline ->
-    #    segment aligned to video_segments.
+    #    segment aligned to video_segments (with X-TIMESTAMP-MAP for sync).
     sub_lang = job_config.get("subtitle_language", "en")
     sub_url = job_config.get("subtitle_url")
     sub_playlist = None
@@ -604,7 +721,8 @@ def _run_hls_pipeline(pinfo, job_config, input_url, variants, clips_sec, fps, go
         if convert_subtitle_to_vtt(ffmpeg_path, sub_url, vtt_tmp):
             cues = parse_vtt_cues(Path(vtt_tmp))
             merged_cues = build_merged_timeline_cues(cues, clips_sec if not use_open_ended else [])
-            sub_playlist = segment_vtt_for_hls(merged_cues, video_segments, output_dir, sub_lang)
+            sub_playlist = segment_vtt_for_hls(merged_cues, video_segments, output_dir,
+                                               sub_lang, mpegts_base_90k=mpegts_base)
 
     # 6) Master playlist.
     pinfo["progress_pct"] = 92
