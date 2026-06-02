@@ -14,10 +14,17 @@ from s3_uploader import build_s3_client, start_live_upload_watcher
 _live_channels = {}
 _live_locks = {}
 _executor = ThreadPoolExecutor(max_workers=10)
+_channel_log_paths = {}  # channel_id -> log_path (survives cleanup for log retrieval)
 
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 _LOGS_DIR = os.path.join(_BACKEND_DIR, "logs")
 os.makedirs(_LOGS_DIR, exist_ok=True)
+
+
+def _sanitize_filename(name: str) -> str:
+    import re
+    safe = re.sub(r'[^\w\-]', '_', name.strip())
+    return safe[:80] or "channel"
 
 
 def build_live_hls_command(
@@ -211,7 +218,9 @@ def start_live_channel(channel_config: dict, db_update_callback=None) -> dict:
             input_type=input_type,
         )
 
-    log_path = os.path.join(_LOGS_DIR, f"live_{channel_id}.log")
+    safe_name = _sanitize_filename(name)
+    log_path = os.path.join(_LOGS_DIR, f"{safe_name}_live.log")
+    _channel_log_paths[channel_id] = log_path
     logging.info(f"[LIVE:{name}] FFmpeg cmd: {' '.join(ffmpeg_cmd)}")
     logging.info(f"[LIVE:{name}] FFmpeg log: {log_path}")
 
@@ -410,7 +419,7 @@ def get_live_channel_logs(channel_id: str, tail: int = 100) -> str:
     if pinfo:
         log_path = pinfo.get("log_path", "")
     else:
-        log_path = os.path.join(_LOGS_DIR, f"live_{channel_id}.log")
+        log_path = _channel_log_paths.get(channel_id, "")
 
     if not log_path or not os.path.exists(log_path):
         return ""

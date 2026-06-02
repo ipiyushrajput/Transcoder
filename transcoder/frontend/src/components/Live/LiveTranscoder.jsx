@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import {
   Box, Button, Alert, CircularProgress, Snackbar, Typography,
   Chip, Dialog, DialogTitle, DialogContent, DialogActions, Stack,
@@ -69,7 +69,7 @@ function ChannelRunningDialog({ open, channelId, playbackUrl, onClose, onStop })
   )
 }
 
-export default function LiveTranscoder({ onNavigateToJobs }) {
+export default function LiveTranscoder({ onNavigateToJobs, prefillData }) {
   const [input, setInput] = useState(DEFAULT_INPUT)
   const [output, setOutput] = useState(DEFAULT_OUTPUT)
   const [variants, setVariants] = useState([])
@@ -77,6 +77,16 @@ export default function LiveTranscoder({ onNavigateToJobs }) {
   const [submitting, setSubmitting] = useState(false)
   const [errors, setErrors] = useState({})
   const [snack, setSnack] = useState({ open: false, msg: '', severity: 'info' })
+  const prevPrefill = useRef(null)
+
+  useEffect(() => {
+    if (prefillData && prefillData !== prevPrefill.current) {
+      prevPrefill.current = prefillData
+      setInput(prefillData.input || DEFAULT_INPUT)
+      setOutput(prefillData.output || DEFAULT_OUTPUT)
+      setVariants(prefillData.variants || [])
+    }
+  }, [prefillData])
 
   const showSnack = (msg, severity = 'info') => setSnack({ open: true, msg, severity })
 
@@ -141,7 +151,6 @@ export default function LiveTranscoder({ onNavigateToJobs }) {
       <Box sx={{ display: 'flex', alignItems: 'center', mb: 3, gap: 2 }}>
         <LiveTvIcon color="error" />
         <Typography variant="h5" sx={{ flex: 1 }}>Live Transcoding Channel</Typography>
-        <Chip label="AWS MediaLive-style" variant="outlined" size="small" color="error" />
         {channelRunning && (
           <Chip
             label="LIVE"

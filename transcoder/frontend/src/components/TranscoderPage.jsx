@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useCallback } from 'react'
 import {
   Box, AppBar, Toolbar, Typography, Tabs, Tab, Container, Chip,
 } from '@mui/material'
@@ -11,6 +11,12 @@ import JobsTable from './shared/JobsTable'
 
 export default function TranscoderPage() {
   const [tab, setTab] = useState(2)
+  const [prefill, setPrefill] = useState(null)
+
+  const handleClone = useCallback((jobType, formData) => {
+    setPrefill({ type: jobType, data: formData })
+    setTab(jobType === 'VOD' ? 0 : 1)
+  }, [])
 
   return (
     <Box sx={{ minHeight: '100vh', bgcolor: 'background.default' }}>
@@ -26,7 +32,7 @@ export default function TranscoderPage() {
             <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: '-0.5px' }}>
               Transcoder
             </Typography>
-            <Chip label="Production" size="small" color="secondary" sx={{ height: 20, fontSize: 10 }} />
+            <Chip label="Inhouse" size="small" color="secondary" sx={{ height: 20, fontSize: 10 }} />
           </Box>
           <Tabs
             value={tab}
@@ -44,9 +50,19 @@ export default function TranscoderPage() {
       </AppBar>
 
       <Container maxWidth="xl" sx={{ py: 3 }}>
-        {tab === 0 && <VODTranscoder onNavigateToJobs={() => setTab(2)} />}
-        {tab === 1 && <LiveTranscoder onNavigateToJobs={() => setTab(2)} />}
-        {tab === 2 && <JobsTable />}
+        {tab === 0 && (
+          <VODTranscoder
+            onNavigateToJobs={() => setTab(2)}
+            prefillData={prefill?.type === 'VOD' ? prefill.data : null}
+          />
+        )}
+        {tab === 1 && (
+          <LiveTranscoder
+            onNavigateToJobs={() => setTab(2)}
+            prefillData={prefill?.type === 'LIVE' ? prefill.data : null}
+          />
+        )}
+        {tab === 2 && <JobsTable onClone={handleClone} />}
       </Container>
     </Box>
   )
