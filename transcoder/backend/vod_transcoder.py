@@ -32,10 +32,27 @@ import time_utils
 _vod_jobs = {}
 _vod_locks = {}
 _executor = ThreadPoolExecutor(max_workers=4)
+_job_log_paths = {}  # job_id -> log_path (survives job cleanup for log retrieval)
 
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 _LOGS_DIR = os.path.join(_BACKEND_DIR, "logs")
 os.makedirs(_LOGS_DIR, exist_ok=True)
+
+
+def _sanitize_filename(name: str) -> str:
+    """Convert a channel name to a safe filename (max 80 chars)."""
+    safe = re.sub(r'[^\w\-]', '_', name.strip())
+    return safe[:80] or "channel"
+
+
+def _clog(log_path: str, level: str, msg: str):
+    """Write msg to both the root logger and the channel log file."""
+    getattr(logging, level.lower(), logging.info)(msg)
+    try:
+        with open(log_path, "a", errors="replace") as _f:
+            _f.write(f"{datetime.utcnow().isoformat()} [{level.upper()}] {msg}\n")
+    except Exception:
+        pass
 
 
 # ----------------------------------------------------------------------------
@@ -450,7 +467,9 @@ def start_vod_job(job_config: dict, db_update_callback=None) -> dict:
     output_dir = _local_path if (dest == "LOCAL" and _local_path) else os.path.join(tmp_dir, "output")
     os.makedirs(output_dir, exist_ok=True)
 
-    log_path = os.path.join(_LOGS_DIR, f"vod_{job_id}.log")
+    safe_name = _sanitize_filename(name)
+    log_path = os.path.join(_LOGS_DIR, f"{safe_name}.log")
+    _job_log_paths[job_id] = log_path
     Path(log_path).write_text(f"--- VOD job {name} ({job_id}) started {datetime.utcnow().isoformat()} ---\n")
 
     lock = threading.Lock()
@@ -517,7 +536,7 @@ def _run_vod_pipeline(job_id: str, db_update_callback=None):
         gop_frames = int(round(segment_size * float(fps)))
         if gop_frames <= 0:
             gop_frames = segment_size * 25
-        logging.info(f"[VOD:{name}] fps={fps} duration={duration:.3f}s gop_frames={gop_frames}")
+        _clog(log_path, "INFO", f"[VOD:{name}] fps={fps} duration={duration:.3f}s gop_frames={gop_frames}")
 
         clips_sec = _normalize_clips(job_config.get("clips", []), fps, duration)
         use_open_ended = len(clips_sec) == 1 and clips_sec[0] == (0.0, 0.0)
@@ -533,7 +552,7 @@ def _run_vod_pipeline(job_id: str, db_update_callback=None):
                     output_dir, job_config.get("s3_bucket", ""),
                     job_config.get("s3_path", name).strip("/"), s3_client)
             except Exception as e:
-                logging.error(f"[VOD:{name}] S3 watcher failed: {e}")
+                _clog(log_path, "ERROR", f"[VOD:{name}] S3 watcher failed: {e}")
 
         if output_type != "HLS":
             # MP4: single encode of the first clip range.
@@ -558,12 +577,13 @@ def _run_vod_pipeline(job_id: str, db_update_callback=None):
                 client = s3_client or build_s3_client()
                 cnt = upload_directory_to_s3(output_dir, job_config.get("s3_bucket", ""),
                                              job_config.get("s3_path", name).strip("/"), client)
-                logging.info(f"[VOD:{name}] Final S3 upload: {cnt} files")
+                _clog(log_path, "INFO", f"[VOD:{name}] Final S3 upload: {cnt} files")
             except Exception as e:
-                logging.error(f"[VOD:{name}] Final S3 upload error: {e}")
+                _clog(log_path, "ERROR", f"[VOD:{name}] Final S3 upload error: {e}")
 
     except Exception as e:
-        logging.error(f"[VOD:{name}] Pipeline error: {e}", exc_info=True)
+        _clog(log_path, "ERROR", f"[VOD:{name}] Pipeline error: {e}")
+        logging.exception(f"[VOD:{name}] Pipeline error")
         error_msg = str(e)
         status = "STOPPED" if pinfo.get("cancel") else "FAILED"
         _stop_watchers(observer, handler, periodic)
@@ -840,7 +860,10 @@ def list_active_vod_jobs() -> list:
 
 def get_vod_job_logs(job_id: str, tail: int = 100) -> str:
     pinfo = _vod_jobs.get(job_id)
-    log_path = pinfo.get("log_path") if pinfo else os.path.join(_LOGS_DIR, f"vod_{job_id}.log")
+    if pinfo:
+        log_path = pinfo.get("log_path", "")
+    else:
+        log_path = _job_log_paths.get(job_id, "")
     if not log_path or not os.path.exists(log_path):
         return ""
     try:

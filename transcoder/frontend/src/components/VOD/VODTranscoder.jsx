@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import {
   Box, Button, Alert, CircularProgress, Snackbar, Typography,
   Chip, Dialog, DialogTitle, DialogContent, DialogActions, Stack,
@@ -87,7 +87,7 @@ function JobStartedDialog({ open, jobId, playbackUrl, onClose, onStop }) {
   )
 }
 
-export default function VODTranscoder({ onNavigateToJobs }) {
+export default function VODTranscoder({ onNavigateToJobs, prefillData }) {
   const [input, setInput] = useState(DEFAULT_INPUT)
   const [output, setOutput] = useState(DEFAULT_OUTPUT)
   const [variants, setVariants] = useState([])
@@ -97,6 +97,17 @@ export default function VODTranscoder({ onNavigateToJobs }) {
   const [jobStarted, setJobStarted] = useState(null)
   const [snack, setSnack] = useState({ open: false, msg: '', severity: 'info' })
   const [errors, setErrors] = useState({})
+  const prevPrefill = useRef(null)
+
+  useEffect(() => {
+    if (prefillData && prefillData !== prevPrefill.current) {
+      prevPrefill.current = prefillData
+      setInput(prefillData.input || DEFAULT_INPUT)
+      setOutput(prefillData.output || DEFAULT_OUTPUT)
+      setVariants(prefillData.variants || [])
+      setEsam(prefillData.esam || DEFAULT_ESAM)
+    }
+  }, [prefillData])
 
   const showSnack = (msg, severity = 'info') => setSnack({ open: true, msg, severity })
 
@@ -162,7 +173,6 @@ export default function VODTranscoder({ onNavigateToJobs }) {
         <Typography variant="h5" sx={{ flex: 1 }}>
           VOD Transcoding Job
         </Typography>
-        <Chip label="AWS MediaConvert-style" variant="outlined" size="small" color="primary" />
       </Box>
 
       <Stack spacing={2.5}>

@@ -5,12 +5,16 @@ import {
   Button, TextField, Select, MenuItem, FormControl, InputLabel,
   Dialog, DialogTitle, DialogContent, DialogActions, Tooltip,
   Alert, CircularProgress, Pagination, Stack, LinearProgress,
+  Divider, Accordion, AccordionSummary, AccordionDetails,
 } from '@mui/material'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import DeleteIcon from '@mui/icons-material/Delete'
 import InfoIcon from '@mui/icons-material/Info'
 import StopIcon from '@mui/icons-material/Stop'
 import ContentCopyIcon from '@mui/icons-material/ContentCopy'
+import FileCopyIcon from '@mui/icons-material/FileCopy'
+import EditIcon from '@mui/icons-material/Edit'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import { listJobs, getJob, getJobLogs, deleteJob, stopVodJob, stopLiveChannel } from '../../api/transcoder'
 
 const STATUS_COLORS = {
@@ -21,6 +25,13 @@ const STATUS_COLORS = {
   PENDING: 'default',
 }
 
+function secsToHMS(totalSecs) {
+  const s = Math.round(totalSecs)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+}
 
 function LogsDialog({ open, jobId, jobStatus, onClose }) {
   const [logs, setLogs] = useState('')
@@ -42,20 +53,16 @@ function LogsDialog({ open, jobId, jobStatus, onClose }) {
     if (!open || !jobId) return
     setLoading(true)
     fetchLogs().finally(() => setLoading(false))
-
-    // Auto-refresh every 10s for RUNNING jobs; stop once done
     if (jobStatus === 'RUNNING') {
       intervalRef.current = setInterval(fetchLogs, 10000)
     }
     return () => clearInterval(intervalRef.current)
   }, [open, jobId, jobStatus, fetchLogs])
 
-  // Stop polling when status changes away from RUNNING
   useEffect(() => {
     if (jobStatus !== 'RUNNING') clearInterval(intervalRef.current)
   }, [jobStatus])
 
-  // Scroll to bottom when new logs arrive
   useEffect(() => {
     if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: 'smooth' })
   }, [logs])
@@ -64,12 +71,7 @@ function LogsDialog({ open, jobId, jobStatus, onClose }) {
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
         FFmpeg Logs — {jobId?.slice(0, 8)}
-        <Chip
-          label={jobStatus}
-          color={STATUS_COLORS[jobStatus] || 'default'}
-          size="small"
-          sx={{ ml: 1 }}
-        />
+        <Chip label={jobStatus} color={STATUS_COLORS[jobStatus] || 'default'} size="small" sx={{ ml: 1 }} />
         <Box sx={{ flex: 1 }} />
         <IconButton size="small" onClick={fetchLogs}><RefreshIcon fontSize="small" /></IconButton>
       </DialogTitle>
@@ -77,14 +79,7 @@ function LogsDialog({ open, jobId, jobStatus, onClose }) {
         {loading ? (
           <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}><CircularProgress size={24} /></Box>
         ) : (
-          <Box
-            component="pre"
-            sx={{
-              fontSize: 11, bgcolor: '#0d1117', color: '#e6edf3', p: 2,
-              borderRadius: 1, overflow: 'auto', maxHeight: 500,
-              whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace',
-            }}
-          >
+          <Box component="pre" sx={{ fontSize: 11, bgcolor: '#0d1117', color: '#e6edf3', p: 2, borderRadius: 1, overflow: 'auto', maxHeight: 500, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace' }}>
             {logs || 'No logs found for this job.'}
             <div ref={bottomRef} />
           </Box>
@@ -100,9 +95,38 @@ function LogsDialog({ open, jobId, jobStatus, onClose }) {
   )
 }
 
+function SectionHeader({ children }) {
+  return (
+    <Typography variant="subtitle2" sx={{ mt: 2, mb: 1, color: 'primary.main', fontWeight: 700, textTransform: 'uppercase', fontSize: 11, letterSpacing: 0.5 }}>
+      {children}
+    </Typography>
+  )
+}
+
+function DetailRow({ label, value, mono }) {
+  if (value === null || value === undefined || value === '') return null
+  return (
+    <Box sx={{ display: 'contents' }}>
+      <Typography variant="caption" color="text.secondary" sx={{ gridColumn: '1', py: 0.4 }}>{label}</Typography>
+      <Typography variant="body2" sx={{ gridColumn: '2', py: 0.4, wordBreak: 'break-all', fontFamily: mono ? 'monospace' : 'inherit', fontSize: mono ? 11 : 'inherit' }}>
+        {String(value)}
+      </Typography>
+    </Box>
+  )
+}
+
+function DetailsGrid({ children }) {
+  return (
+    <Box sx={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: '2px 12px', alignItems: 'start' }}>
+      {children}
+    </Box>
+  )
+}
+
 function JobDetailDialog({ open, jobId, onClose }) {
   const [job, setJob] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [copied, setCopied] = useState(false)
 
   useEffect(() => {
     if (!open || !jobId) return
@@ -110,91 +134,297 @@ function JobDetailDialog({ open, jobId, onClose }) {
     getJob(jobId).then(setJob).catch(() => setJob(null)).finally(() => setLoading(false))
   }, [open, jobId])
 
-  const copyUrl = () => { if (job?.playback_url) navigator.clipboard.writeText(job.playback_url) }
+  const handleCopyConfig = () => {
+    if (!job) return
+    const config = buildCopyConfig(job)
+    navigator.clipboard.writeText(JSON.stringify(config, null, 2)).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
-      <DialogTitle>Job Details — {job?.name || jobId?.slice(0, 8)}</DialogTitle>
-      <DialogContent>
-        {loading ? <CircularProgress size={24} /> : job ? (
-          <Stack spacing={2} sx={{ pt: 1 }}>
-            <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 2 }}>
-              <Detail label="Channel Name" value={job.name} />
-              <Detail label="Job ID" value={job.job_id} />
-              <Detail label="Type" value={job.type} />
-              <Detail label="Status" value={<Chip label={job.status} color={STATUS_COLORS[job.status] || 'default'} size="small" />} />
-              <Detail label="Input" value={job.input_url} truncate />
-              <Detail label="Output Type" value={job.output_type} />
-              <Detail label="Destination" value={job.output_destination} />
-              <Detail label="Preset" value={job.preset} />
-              <Detail label="Segment (s)" value={job.segment_length} />
-              <Detail label="Started" value={job.started_at} />
-              <Detail label="Completed" value={job.completed_at || '—'} />
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth scroll="paper">
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <Box sx={{ flex: 1 }}>
+          Job Details — <span style={{ fontWeight: 400, fontSize: 14 }}>{job?.name || jobId?.slice(0, 8)}</span>
+        </Box>
+        <Tooltip title={copied ? 'Copied!' : 'Copy full config as JSON'}>
+          <Button size="small" variant="outlined" startIcon={<ContentCopyIcon fontSize="small" />} onClick={handleCopyConfig} disabled={!job} color={copied ? 'success' : 'primary'} sx={{ fontSize: 12 }}>
+            {copied ? 'Copied!' : 'Copy Config'}
+          </Button>
+        </Tooltip>
+      </DialogTitle>
+      <DialogContent dividers>
+        {loading ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}><CircularProgress size={24} /></Box>
+        ) : job ? (
+          <Stack spacing={0.5} sx={{ pt: 0.5 }}>
+            {/* Status */}
+            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', mb: 1 }}>
+              <Chip label={job.type} size="small" variant="outlined" color={job.type === 'LIVE' ? 'error' : 'primary'} />
+              <Chip label={job.status} size="small" color={STATUS_COLORS[job.status] || 'default'} />
             </Box>
+
+            <SectionHeader>Job Info</SectionHeader>
+            <DetailsGrid>
+              <DetailRow label="Channel Name" value={job.name} />
+              <DetailRow label="Job ID" value={job.job_id} mono />
+              <DetailRow label="Started" value={job.started_at} />
+              <DetailRow label="Completed" value={job.completed_at} />
+              <DetailRow label="Created" value={job.created_at} />
+            </DetailsGrid>
+
+            <Divider sx={{ my: 1 }} />
+            <SectionHeader>Input Configuration</SectionHeader>
+            <DetailsGrid>
+              <DetailRow label="Input Type" value={job.input_type} />
+              <DetailRow label="Input URL" value={job.input_url} mono />
+              <DetailRow label="Subtitle URL" value={job.subtitle_url} mono />
+              <DetailRow label="Subtitle Language" value={job.subtitle_language} />
+            </DetailsGrid>
+            {job.clips?.length > 0 && (
+              <Box sx={{ mt: 1 }}>
+                <Typography variant="caption" color="text.secondary">Clips ({job.clips.length})</Typography>
+                {job.clips.map((c, i) => (
+                  <Typography key={i} variant="body2" sx={{ fontFamily: 'monospace', fontSize: 11 }}>
+                    {i + 1}. {c.start_timecode} → {c.end_timecode}
+                  </Typography>
+                ))}
+              </Box>
+            )}
+
+            <Divider sx={{ my: 1 }} />
+            <SectionHeader>Output Configuration</SectionHeader>
+            <DetailsGrid>
+              <DetailRow label="Output Type" value={job.output_type} />
+              <DetailRow label="Destination" value={job.output_destination} />
+              <DetailRow label="Master Filename" value={job.master_filename} />
+              <DetailRow label="Segment Length" value={job.segment_length ? `${job.segment_length}s` : null} />
+              <DetailRow label="HLS Playlist Type" value={job.hls_playlist_type} />
+              <DetailRow label="HLS Flags" value={job.hls_flags} mono />
+              <DetailRow label="HLS List Size" value={job.hls_list_size} />
+              <DetailRow label="Preset" value={job.preset} />
+              {job.output_destination === 'S3' && <>
+                <DetailRow label="S3 Bucket" value={job.s3_bucket} mono />
+                <DetailRow label="S3 Path" value={job.s3_path} mono />
+                <DetailRow label="CloudFront Domain" value={job.s3_cloudfront_domain} mono />
+              </>}
+              {job.output_destination === 'LOCAL' && (
+                <DetailRow label="Local Path" value={job.local_path} mono />
+              )}
+              {job.output_destination === 'MEDIAPACKAGE' && <>
+                <DetailRow label="MediaPackage URL" value={job.mediapackage_url} mono />
+                <DetailRow label="MP User" value={job.mediapackage_user} />
+              </>}
+              {job.output_type === 'RTMP' && (
+                <DetailRow label="RTMP Output URL" value={job.rtmp_output_url} mono />
+              )}
+            </DetailsGrid>
+
             {job.playback_url && (
-              <Box sx={{ bgcolor: 'background.default', p: 2, borderRadius: 1 }}>
+              <Box sx={{ bgcolor: 'background.default', p: 1.5, borderRadius: 1, mt: 1 }}>
                 <Typography variant="caption" color="text.secondary">Playback URL</Typography>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5 }}>
-                  <Typography variant="body2" sx={{ flex: 1, wordBreak: 'break-all', fontSize: 12 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mt: 0.5 }}>
+                  <Typography variant="body2" sx={{ flex: 1, wordBreak: 'break-all', fontSize: 11, fontFamily: 'monospace' }}>
                     {job.playback_url}
                   </Typography>
-                  <IconButton size="small" onClick={copyUrl}><ContentCopyIcon fontSize="small" /></IconButton>
+                  <IconButton size="small" onClick={() => navigator.clipboard.writeText(job.playback_url)}>
+                    <ContentCopyIcon fontSize="small" />
+                  </IconButton>
                 </Box>
               </Box>
             )}
-            {job.error_message && (
-              <Alert severity="error" sx={{ fontSize: 12 }}>
-                <Typography variant="caption" fontWeight={700}>Error Details:</Typography>
-                <Box component="pre" sx={{ whiteSpace: 'pre-wrap', m: 0, mt: 0.5, fontSize: 11 }}>
-                  {job.error_message.slice(-1000)}
-                </Box>
-              </Alert>
-            )}
+
             {job.variants?.length > 0 && (
-              <Box>
-                <Typography variant="subtitle2" sx={{ mb: 1 }}>Output Variants</Typography>
+              <>
+                <Divider sx={{ my: 1 }} />
+                <SectionHeader>Video / Audio Variants ({job.variants.length})</SectionHeader>
                 <TableContainer>
                   <Table size="small">
                     <TableHead>
                       <TableRow>
-                        {['Resolution', 'Video Codec', 'Video Bitrate', 'Audio Codec', 'Audio Bitrate', 'FPS'].map(h => (
-                          <TableCell key={h} sx={{ fontWeight: 600, fontSize: 11 }}>{h}</TableCell>
+                        {['Resolution', 'V.Codec', 'V.Bitrate', 'FPS', 'GOP', 'Refs', 'Profile', 'Level', 'A.Codec', 'A.Bitrate', 'Sample Rate'].map(h => (
+                          <TableCell key={h} sx={{ fontWeight: 600, fontSize: 10, p: '4px 6px' }}>{h}</TableCell>
                         ))}
                       </TableRow>
                     </TableHead>
                     <TableBody>
                       {job.variants.map((v, i) => (
                         <TableRow key={i}>
-                          <TableCell>{v.width}×{v.height}</TableCell>
-                          <TableCell>{v.video_codec}</TableCell>
-                          <TableCell>{(v.video_bitrate / 1000).toFixed(0)}kbps</TableCell>
-                          <TableCell>{v.audio_codec}</TableCell>
-                          <TableCell>{(v.audio_bitrate / 1000).toFixed(0)}kbps</TableCell>
-                          <TableCell>{v.framerate}</TableCell>
+                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.width}×{v.height}</TableCell>
+                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.video_codec}</TableCell>
+                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.video_bitrate ? `${Math.round(v.video_bitrate / 1000)}k` : '—'}</TableCell>
+                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.framerate}</TableCell>
+                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.gop}</TableCell>
+                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.reference_frames}</TableCell>
+                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.profile}</TableCell>
+                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.level}</TableCell>
+                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.audio_codec}</TableCell>
+                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.audio_bitrate ? `${Math.round(v.audio_bitrate / 1000)}k` : '—'}</TableCell>
+                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.sample_rate}</TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
                   </Table>
                 </TableContainer>
-              </Box>
+              </>
+            )}
+
+            {job.esam_enabled && (
+              <>
+                <Divider sx={{ my: 1 }} />
+                <SectionHeader>ESAM Ad Signaling</SectionHeader>
+                <DetailsGrid>
+                  <DetailRow label="ESAM Enabled" value="Yes" />
+                </DetailsGrid>
+                {job.esam_scc_xml && (
+                  <Accordion disableGutters sx={{ mt: 1, bgcolor: 'background.default' }}>
+                    <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                      <Typography variant="caption" sx={{ fontWeight: 600 }}>SCC XML</Typography>
+                    </AccordionSummary>
+                    <AccordionDetails sx={{ p: 1 }}>
+                      <Box component="pre" sx={{ fontSize: 10, overflow: 'auto', maxHeight: 200, m: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace' }}>
+                        {job.esam_scc_xml}
+                      </Box>
+                    </AccordionDetails>
+                  </Accordion>
+                )}
+                {job.esam_mcc_xml && (
+                  <Accordion disableGutters sx={{ mt: 0.5, bgcolor: 'background.default' }}>
+                    <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                      <Typography variant="caption" sx={{ fontWeight: 600 }}>MCC XML</Typography>
+                    </AccordionSummary>
+                    <AccordionDetails sx={{ p: 1 }}>
+                      <Box component="pre" sx={{ fontSize: 10, overflow: 'auto', maxHeight: 200, m: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace' }}>
+                        {job.esam_mcc_xml}
+                      </Box>
+                    </AccordionDetails>
+                  </Accordion>
+                )}
+              </>
+            )}
+
+            {job.error_message && (
+              <Alert severity="error" sx={{ mt: 1, fontSize: 12 }}>
+                <Typography variant="caption" fontWeight={700}>Error Details:</Typography>
+                <Box component="pre" sx={{ whiteSpace: 'pre-wrap', m: 0, mt: 0.5, fontSize: 11 }}>
+                  {job.error_message.slice(-1000)}
+                </Box>
+              </Alert>
             )}
           </Stack>
         ) : <Typography color="error">Failed to load job details</Typography>}
       </DialogContent>
-      <DialogActions><Button onClick={onClose}>Close</Button></DialogActions>
+      <DialogActions>
+        <Button onClick={onClose}>Close</Button>
+      </DialogActions>
     </Dialog>
   )
 }
 
-function Detail({ label, value, truncate }) {
-  return (
-    <Box>
-      <Typography variant="caption" color="text.secondary">{label}</Typography>
-      <Typography variant="body2" sx={truncate ? { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } : {}}>
-        {value ?? '—'}
-      </Typography>
-    </Box>
-  )
+function buildCopyConfig(job) {
+  const base = {
+    name: job.name,
+    input_type: job.input_type,
+    input_url: job.input_url,
+    output_type: job.output_type,
+    output_destination: job.output_destination,
+    master_filename: job.master_filename,
+    segment_length: job.segment_length,
+    hls_playlist_type: job.hls_playlist_type,
+    hls_flags: job.hls_flags,
+    hls_list_size: job.hls_list_size,
+    preset: job.preset,
+    variants: (job.variants || []).map(v => ({
+      width: v.width, height: v.height,
+      video_codec: v.video_codec, video_bitrate: v.video_bitrate,
+      framerate: v.framerate, gop: v.gop, reference_frames: v.reference_frames,
+      profile: v.profile, level: v.level,
+      audio_codec: v.audio_codec, audio_bitrate: v.audio_bitrate, sample_rate: v.sample_rate,
+    })),
+  }
+  if (job.s3_bucket) { base.s3_bucket = job.s3_bucket; base.s3_path = job.s3_path; base.s3_cloudfront_domain = job.s3_cloudfront_domain }
+  if (job.local_path) base.local_path = job.local_path
+  if (job.mediapackage_url) { base.mediapackage_url = job.mediapackage_url; base.mediapackage_user = job.mediapackage_user }
+  if (job.rtmp_output_url) base.rtmp_output_url = job.rtmp_output_url
+  if (job.subtitle_url) { base.subtitle_url = job.subtitle_url; base.subtitle_language = job.subtitle_language }
+  if (job.clips?.length) base.clips = job.clips.map(c => ({ start_timecode: c.start_timecode, end_timecode: c.end_timecode, clip_order: c.clip_order }))
+  if (job.esam_enabled) { base.esam_enabled = true; base.esam_scc_xml = job.esam_scc_xml; base.esam_mcc_xml = job.esam_mcc_xml }
+  return base
+}
+
+function buildVodPrefill(job) {
+  return {
+    input: {
+      channel_name: job.name || '',
+      input_type: (job.input_type || 'FILE').toUpperCase(),
+      input_url: job.input_url || '',
+      clips: (job.clips || []).map(c => ({ start_timecode: c.start_timecode, end_timecode: c.end_timecode, clip_order: c.clip_order })),
+      subtitle_url: job.subtitle_url || '',
+      subtitle_language: job.subtitle_language || 'en',
+    },
+    output: {
+      output_type: (job.output_type || 'HLS').toUpperCase(),
+      output_destination: (job.output_destination || 'LOCAL').toUpperCase(),
+      s3_bucket: job.s3_bucket || '',
+      s3_path: job.s3_path || '',
+      s3_cloudfront_domain: job.s3_cloudfront_domain || '',
+      local_path: job.local_path || '',
+      master_filename: job.master_filename || 'master',
+      segment_length: job.segment_length || 6,
+      hls_playlist_type: job.hls_playlist_type || 'vod',
+      hls_flags: job.hls_flags || 'independent_segments',
+      hls_list_size: job.hls_list_size || 0,
+      preset: job.preset || 'medium',
+    },
+    variants: (job.variants || []).map(v => ({
+      width: v.width, height: v.height,
+      video_codec: v.video_codec, video_bitrate: v.video_bitrate,
+      framerate: v.framerate, gop: v.gop, reference_frames: v.reference_frames,
+      profile: v.profile, level: v.level,
+      audio_codec: v.audio_codec, audio_bitrate: v.audio_bitrate, sample_rate: v.sample_rate,
+    })),
+    esam: {
+      esam_enabled: job.esam_enabled || false,
+      esam_scc_xml: job.esam_scc_xml || '',
+      esam_mcc_xml: job.esam_mcc_xml || '',
+    },
+  }
+}
+
+function buildLivePrefill(job) {
+  return {
+    input: {
+      channel_name: job.name || '',
+      input_type: (job.input_type || 'RTMP').toUpperCase(),
+      input_url: job.input_url || '',
+    },
+    output: {
+      output_type: (job.output_type || 'HLS').toUpperCase(),
+      output_destination: (job.output_destination || 'LOCAL').toUpperCase(),
+      s3_bucket: job.s3_bucket || '',
+      s3_path: job.s3_path || '',
+      s3_cloudfront_domain: job.s3_cloudfront_domain || '',
+      local_path: job.local_path || '',
+      mediapackage_url: job.mediapackage_url || '',
+      mediapackage_user: job.mediapackage_user || '',
+      mediapackage_password: job.mediapackage_password || '',
+      rtmp_output_url: job.rtmp_output_url || '',
+      master_filename: job.master_filename || 'live',
+      segment_length: job.segment_length || 4,
+      hls_list_size: job.hls_list_size || 6,
+      hls_flags: job.hls_flags || 'delete_segments+append_list',
+      preset: job.preset || 'veryfast',
+    },
+    variants: (job.variants || []).map(v => ({
+      width: v.width, height: v.height,
+      video_codec: v.video_codec, video_bitrate: v.video_bitrate,
+      framerate: v.framerate, gop: v.gop, reference_frames: v.reference_frames,
+      profile: v.profile, level: v.level,
+      audio_codec: v.audio_codec, audio_bitrate: v.audio_bitrate, sample_rate: v.sample_rate,
+    })),
+  }
 }
 
 function RunningCell({ progressPct }) {
@@ -202,14 +432,8 @@ function RunningCell({ progressPct }) {
   return (
     <Box sx={{ minWidth: 110 }}>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-        <LinearProgress
-          variant="determinate"
-          value={pct}
-          sx={{ flex: 1, height: 5, borderRadius: 2 }}
-        />
-        <Typography variant="caption" sx={{ fontWeight: 600, minWidth: 32, textAlign: 'right' }}>
-          {pct}%
-        </Typography>
+        <LinearProgress variant="determinate" value={pct} sx={{ flex: 1, height: 5, borderRadius: 2 }} />
+        <Typography variant="caption" sx={{ fontWeight: 600, minWidth: 32, textAlign: 'right' }}>{pct}%</Typography>
       </Box>
       <Typography variant="caption" color="text.secondary">Encoding…</Typography>
     </Box>
@@ -227,21 +451,21 @@ function CompletedCell({ completedAt, startedAt, status, progressPct }) {
       </Typography>
       {startedAt && (
         <Typography variant="caption" color="text.secondary">
-          {Math.round((d - new Date(startedAt)) / 1000)}s duration
+          Transcode duration: {secsToHMS((d - new Date(startedAt)) / 1000)}
         </Typography>
       )}
     </Box>
   )
 }
 
-export default function JobsTable() {
+export default function JobsTable({ onClone }) {
   const [jobs, setJobs] = useState([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(false)
   const [typeFilter, setTypeFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
-  const [logsJob, setLogsJob] = useState(null)   // { job_id, status }
+  const [logsJob, setLogsJob] = useState(null)
   const [detailJobId, setDetailJobId] = useState(null)
   const [error, setError] = useState('')
   const PER_PAGE = 15
@@ -269,7 +493,6 @@ export default function JobsTable() {
     return () => clearInterval(t)
   }, [fetchJobs])
 
-  // Keep logs dialog job status in sync with jobs list
   useEffect(() => {
     if (logsJob) {
       const updated = jobs.find(j => j.job_id === logsJob.job_id)
@@ -294,6 +517,35 @@ export default function JobsTable() {
       await deleteJob(job.job_id)
       fetchJobs()
     } catch (e) { alert(`Delete failed: ${e.message}`) }
+  }
+
+  const handleClone = async (job) => {
+    try {
+      const fullJob = await getJob(job.job_id)
+      const prefillData = job.type === 'VOD' ? buildVodPrefill(fullJob) : buildLivePrefill(fullJob)
+      onClone && onClone(job.type, prefillData)
+    } catch (e) {
+      alert(`Clone failed: ${e.message}`)
+    }
+  }
+
+  const handleEdit = async (job) => {
+    if (job.status === 'RUNNING') {
+      if (!window.confirm(`Stop "${job.name}" and edit its configuration?`)) return
+      try {
+        await stopLiveChannel(job.job_id)
+      } catch (e) {
+        alert(`Stop failed: ${e.message}`)
+        return
+      }
+    }
+    try {
+      const fullJob = await getJob(job.job_id)
+      const prefillData = buildLivePrefill(fullJob)
+      onClone && onClone('LIVE', prefillData)
+    } catch (e) {
+      alert(`Edit failed: ${e.message}`)
+    }
   }
 
   return (
@@ -343,9 +595,7 @@ export default function JobsTable() {
             <TableBody>
               {jobs.length === 0 && !loading && (
                 <TableRow>
-                  <TableCell colSpan={9} align="center" sx={{ py: 6, color: 'text.secondary' }}>
-                    No jobs found
-                  </TableCell>
+                  <TableCell colSpan={9} align="center" sx={{ py: 6, color: 'text.secondary' }}>No jobs found</TableCell>
                 </TableRow>
               )}
               {jobs.map(job => (
@@ -355,8 +605,7 @@ export default function JobsTable() {
                     <Typography variant="caption" color="text.secondary">{job.job_id.slice(0, 8)}</Typography>
                   </TableCell>
                   <TableCell>
-                    <Chip label={job.type} size="small" variant="outlined"
-                      color={job.type === 'LIVE' ? 'error' : 'primary'} />
+                    <Chip label={job.type} size="small" variant="outlined" color={job.type === 'LIVE' ? 'error' : 'primary'} />
                   </TableCell>
                   <TableCell>
                     <Chip label={job.status} size="small" color={STATUS_COLORS[job.status] || 'default'} sx={{ fontWeight: 600 }} />
@@ -386,9 +635,7 @@ export default function JobsTable() {
                     ) : '—'}
                   </TableCell>
                   <TableCell>
-                    <Typography variant="caption">
-                      {job.created_at ? new Date(job.created_at).toLocaleString() : '—'}
-                    </Typography>
+                    <Typography variant="caption">{job.created_at ? new Date(job.created_at).toLocaleString() : '—'}</Typography>
                   </TableCell>
                   <TableCell sx={{ minWidth: 130 }}>
                     <CompletedCell completedAt={job.completed_at} startedAt={job.started_at} status={job.status} progressPct={job.progress_pct} />
@@ -405,6 +652,18 @@ export default function JobsTable() {
                           <ListAltIconSmall />
                         </IconButton>
                       </Tooltip>
+                      <Tooltip title="Clone">
+                        <IconButton size="small" color="primary" onClick={() => handleClone(job)}>
+                          <FileCopyIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                      {job.type === 'LIVE' && (
+                        <Tooltip title="Edit">
+                          <IconButton size="small" color="secondary" onClick={() => handleEdit(job)}>
+                            <EditIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      )}
                       {job.status === 'RUNNING' && (
                         <Tooltip title="Stop">
                           <IconButton size="small" color="warning" onClick={() => handleStop(job)}>
@@ -434,12 +693,7 @@ export default function JobsTable() {
         </Box>
       )}
 
-      <LogsDialog
-        open={!!logsJob}
-        jobId={logsJob?.job_id}
-        jobStatus={logsJob?.status}
-        onClose={() => setLogsJob(null)}
-      />
+      <LogsDialog open={!!logsJob} jobId={logsJob?.job_id} jobStatus={logsJob?.status} onClose={() => setLogsJob(null)} />
       <JobDetailDialog open={!!detailJobId} jobId={detailJobId} onClose={() => setDetailJobId(null)} />
 
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
