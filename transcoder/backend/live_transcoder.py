@@ -28,6 +28,17 @@ def _sanitize_filename(name: str) -> str:
     return safe[:80] or "channel"
 
 
+def _av1_segment_ext(variants: list) -> str:
+    """Media-segment extension for a live fMP4 output. The live HLS muxer emits
+    one segment pattern for all variants, so we use the extension of the first
+    AV1 variant that sets one (defaults to 'm4s')."""
+    for v in variants or []:
+        if is_av1(v.get("video_codec", "")):
+            ext = str(v.get("av1_segment_ext", "m4s")).lstrip(".").lower()
+            return "mp4" if ext == "mp4" else "m4s"
+    return "m4s"
+
+
 def build_live_hls_command(
     input_url: str,
     output_dir: str,
@@ -132,28 +143,40 @@ def build_live_hls_command(
     )
     cmd.extend(["-var_stream_map", stream_map])
 
-    variant_playlist = os.path.join(output_dir, "live_%v.m3u8")
-
-    cmd.extend([
-        "-f", "hls",
-        "-start_number", "1",
-        "-hls_time", str(segment_size),
-        "-hls_list_size", str(hls_list_size),
-        "-master_pl_name", f"{master_filename}.m3u8",
-        "-hls_flags", hls_flags,
-    ])
+    use_av1 = variants_use_av1(variants)
 
     # AV1 cannot be carried in MPEG-TS: switch the whole output to fragmented
     # MP4 (CMAF) when any variant is AV1. fMP4 is valid for AVC/HEVC too, so a
     # mixed ladder stays consistent.
-    if variants_use_av1(variants):
+    #
+    # For fMP4 we use BARE output names and the caller runs ffmpeg with
+    # cwd=output_dir: FFmpeg splits the playlist path on '/' only when locating
+    # the init segment, so a Windows path would leave the init in the process
+    # CWD (init 404). Bare names + cwd fixes it on every OS. TS output keeps the
+    # existing absolute paths (no init segment, so it is unaffected).
+    if use_av1:
+        seg_ext = _av1_segment_ext(variants)
+        variant_playlist = "live_%v.m3u8"
         cmd.extend([
+            "-f", "hls",
+            "-start_number", "1",
+            "-hls_time", str(segment_size),
+            "-hls_list_size", str(hls_list_size),
+            "-master_pl_name", f"{master_filename}.m3u8",
+            "-hls_flags", hls_flags,
             "-hls_segment_type", "fmp4",
             "-hls_fmp4_init_filename", "init_%v.mp4",
-            "-hls_segment_filename", os.path.join(output_dir, "seg_%v_%05d.m4s"),
+            "-hls_segment_filename", f"seg_%v_%05d.{seg_ext}",
         ])
     else:
+        variant_playlist = os.path.join(output_dir, "live_%v.m3u8")
         cmd.extend([
+            "-f", "hls",
+            "-start_number", "1",
+            "-hls_time", str(segment_size),
+            "-hls_list_size", str(hls_list_size),
+            "-master_pl_name", f"{master_filename}.m3u8",
+            "-hls_flags", hls_flags,
             "-hls_segment_type", "mpegts",
             "-hls_segment_filename", os.path.join(output_dir, "seg_%v_%05d.ts"),
         ])
@@ -259,8 +282,12 @@ def start_live_channel(channel_config: dict, db_update_callback=None) -> dict:
         except Exception as e:
             logging.error(f"[LIVE:{name}] S3 watcher start failed: {e}")
 
+    # For fMP4/AV1 output we use bare filenames, so run ffmpeg with cwd=output
+    # dir (see build_live_hls_command) — this keeps the init segment and media
+    # segments together regardless of OS path separators.
+    ff_cwd = output_dir if (output_type == "HLS" and variants_use_av1(variants)) else None
     with open(log_path, "w") as log_f:
-        process = subprocess.Popen(ffmpeg_cmd, stdout=log_f, stderr=log_f)
+        process = subprocess.Popen(ffmpeg_cmd, stdout=log_f, stderr=log_f, cwd=ff_cwd)
 
     lock = threading.Lock()
     _live_locks[channel_id] = lock

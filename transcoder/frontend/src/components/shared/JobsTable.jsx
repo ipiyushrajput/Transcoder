@@ -344,7 +344,7 @@ function buildCopyConfig(job) {
       framerate: v.framerate, gop: v.gop, reference_frames: v.reference_frames,
       profile: v.profile, level: v.level,
       audio_codec: v.audio_codec, audio_bitrate: v.audio_bitrate, sample_rate: v.sample_rate,
-      av1_preset: v.av1_preset,
+      av1_preset: v.av1_preset, av1_segment_ext: v.av1_segment_ext,
     })),
   }
   if (job.s3_bucket) { base.s3_bucket = job.s3_bucket; base.s3_path = job.s3_path; base.s3_cloudfront_domain = job.s3_cloudfront_domain }
@@ -387,7 +387,7 @@ function buildVodPrefill(job) {
       framerate: v.framerate, gop: v.gop, reference_frames: v.reference_frames,
       profile: v.profile, level: v.level,
       audio_codec: v.audio_codec, audio_bitrate: v.audio_bitrate, sample_rate: v.sample_rate,
-      av1_preset: v.av1_preset,
+      av1_preset: v.av1_preset, av1_segment_ext: v.av1_segment_ext,
     })),
     esam: {
       esam_enabled: job.esam_enabled || false,
@@ -427,7 +427,7 @@ function buildLivePrefill(job) {
       framerate: v.framerate, gop: v.gop, reference_frames: v.reference_frames,
       profile: v.profile, level: v.level,
       audio_codec: v.audio_codec, audio_bitrate: v.audio_bitrate, sample_rate: v.sample_rate,
-      av1_preset: v.av1_preset,
+      av1_preset: v.av1_preset, av1_segment_ext: v.av1_segment_ext,
     })),
   }
 }
