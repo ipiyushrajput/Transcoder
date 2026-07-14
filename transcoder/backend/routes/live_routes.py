@@ -5,6 +5,7 @@ from flask import Blueprint, request, jsonify
 from database import get_db, close_db, Job, JobVariant
 from input_validator import validate_input_url, parse_probe_info
 from live_transcoder import start_live_channel, stop_live_channel, get_live_channel_status
+from av1_utils import validate_av1_variants
 
 live_bp = Blueprint("live", __name__, url_prefix="/api/live")
 
@@ -122,6 +123,10 @@ def start_channel():
     variants = data.get("variants", [])
     if not variants:
         return jsonify({"error": "At least one output variant is required"}), 400
+
+    av1_error = validate_av1_variants(variants)
+    if av1_error:
+        return jsonify({"error": av1_error}), 400
 
     channel_id = str(uuid.uuid4())
 

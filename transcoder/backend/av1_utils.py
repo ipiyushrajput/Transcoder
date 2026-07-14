@@ -26,7 +26,55 @@ Mandatory / important notes when encoding AV1:
   * Keyframe interval is set explicitly so HLS segments stay GOP-aligned.
 """
 
+import logging
+import subprocess
+
 AV1_ENCODERS = {"libsvtav1", "libaom-av1", "librav1e"}
+
+# Preferred order when picking a default AV1 encoder (fastest/best-default first).
+AV1_PREFERENCE = ["libsvtav1", "libaom-av1", "librav1e"]
+
+# Cache of detection results, keyed by ffmpeg_path. Value is a set of available
+# encoder names, or None if detection could not be run.
+_availability_cache = {}
+
+
+def available_av1_encoders(ffmpeg_path: str = "ffmpeg", refresh: bool = False):
+    """Return the set of AV1 encoders this FFmpeg build actually supports.
+
+    Private encoder options (-svtav1-params, -aom-params, -cpu-used, -tiles, …)
+    make FFmpeg abort at argument-parse time ("Option not found") when the
+    corresponding encoder isn't compiled in — so we must not emit a command for
+    an encoder the build lacks. Returns None if `ffmpeg -encoders` could not be
+    run (detection unavailable → callers should degrade gracefully, not block).
+    """
+    if not refresh and ffmpeg_path in _availability_cache:
+        return _availability_cache[ffmpeg_path]
+    found = None
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            out = result.stdout
+            found = {enc for enc in AV1_ENCODERS if enc in out}
+    except Exception as e:
+        logging.warning(f"AV1 encoder detection failed ({ffmpeg_path}): {e}")
+        found = None
+    _availability_cache[ffmpeg_path] = found
+    return found
+
+
+def default_av1_encoder(ffmpeg_path: str = "ffmpeg") -> str:
+    """First available AV1 encoder in preference order (falls back to libsvtav1
+    when detection is unavailable)."""
+    avail = available_av1_encoders(ffmpeg_path)
+    if avail:
+        for enc in AV1_PREFERENCE:
+            if enc in avail:
+                return enc
+    return "libsvtav1"
 
 # Per-encoder speed-knob ranges (min, max, default).
 _PRESET_RANGE = {
@@ -113,6 +161,24 @@ def av1_video_args(codec: str, index, bitrate: int, gop_frames: int,
             f"-rav1e-params{ospec}", rav1e,
         ]
     return args
+
+
+def validate_av1_variants(variants: list, ffmpeg_path: str = "ffmpeg"):
+    """Return an error string if any variant requests an AV1 encoder that this
+    FFmpeg build does not provide, else None. Skips the check when detection is
+    unavailable (returns None) so a probe failure never blocks a valid job."""
+    avail = available_av1_encoders(ffmpeg_path)
+    if avail is None:
+        return None
+    requested = {v.get("video_codec") for v in variants or [] if is_av1(v.get("video_codec", ""))}
+    missing = sorted(requested - avail)
+    if missing:
+        have = ", ".join(sorted(avail)) if avail else "none"
+        return (f"This server's FFmpeg does not support the selected AV1 "
+                f"encoder(s): {', '.join(missing)}. Available AV1 encoders: {have}. "
+                f"Pick an available AV1 library, or rebuild FFmpeg with the "
+                f"missing encoder enabled.")
+    return None
 
 
 def av1_codecs_string(height: int, audio: str = "mp4a.40.2") -> str:
