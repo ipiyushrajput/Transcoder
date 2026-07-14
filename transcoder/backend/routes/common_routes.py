@@ -84,6 +84,20 @@ TEMPLATES = {
              "audio_codec": "aac", "audio_bitrate": 128000, "sample_rate": 48000},
         ],
     },
+    "FHD_AV1": {
+        "label": "Full HD (AV1 - SVT-AV1)",
+        "variants": [
+            {"width": 1920, "height": 1080, "video_codec": "libsvtav1", "video_bitrate": 2500000,
+             "framerate": "25", "gop": 60, "reference_frames": 4, "profile": "main", "level": "4.1",
+             "av1_preset": 8, "audio_codec": "aac", "audio_bitrate": 128000, "sample_rate": 48000},
+            {"width": 1280, "height": 720, "video_codec": "libsvtav1", "video_bitrate": 1200000,
+             "framerate": "25", "gop": 60, "reference_frames": 4, "profile": "main", "level": "4.1",
+             "av1_preset": 8, "audio_codec": "aac", "audio_bitrate": 128000, "sample_rate": 48000},
+            {"width": 640, "height": 360, "video_codec": "libsvtav1", "video_bitrate": 500000,
+             "framerate": "25", "gop": 60, "reference_frames": 4, "profile": "main", "level": "3.0",
+             "av1_preset": 8, "audio_codec": "aac", "audio_bitrate": 128000, "sample_rate": 48000},
+        ],
+    },
     "SD": {
         "label": "SD (360p)",
         "variants": [
@@ -316,6 +330,7 @@ def _serialize_variant(v: JobVariant) -> dict:
         "audio_codec": v.audio_codec,
         "audio_bitrate": v.audio_bitrate,
         "sample_rate": v.sample_rate,
+        "av1_preset": v.av1_preset,
     }
 
 

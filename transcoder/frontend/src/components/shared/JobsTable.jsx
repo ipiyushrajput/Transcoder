@@ -253,7 +253,9 @@ function JobDetailDialog({ open, jobId, onClose }) {
                       {job.variants.map((v, i) => (
                         <TableRow key={i}>
                           <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.width}×{v.height}</TableCell>
-                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.video_codec}</TableCell>
+                          <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>
+                            {v.video_codec}{v.av1_preset != null ? ` (p${v.av1_preset})` : ''}
+                          </TableCell>
                           <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.video_bitrate ? `${Math.round(v.video_bitrate / 1000)}k` : '—'}</TableCell>
                           <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.framerate}</TableCell>
                           <TableCell sx={{ fontSize: 11, p: '4px 6px' }}>{v.gop}</TableCell>
@@ -342,6 +344,7 @@ function buildCopyConfig(job) {
       framerate: v.framerate, gop: v.gop, reference_frames: v.reference_frames,
       profile: v.profile, level: v.level,
       audio_codec: v.audio_codec, audio_bitrate: v.audio_bitrate, sample_rate: v.sample_rate,
+      av1_preset: v.av1_preset,
     })),
   }
   if (job.s3_bucket) { base.s3_bucket = job.s3_bucket; base.s3_path = job.s3_path; base.s3_cloudfront_domain = job.s3_cloudfront_domain }
@@ -384,6 +387,7 @@ function buildVodPrefill(job) {
       framerate: v.framerate, gop: v.gop, reference_frames: v.reference_frames,
       profile: v.profile, level: v.level,
       audio_codec: v.audio_codec, audio_bitrate: v.audio_bitrate, sample_rate: v.sample_rate,
+      av1_preset: v.av1_preset,
     })),
     esam: {
       esam_enabled: job.esam_enabled || false,
@@ -423,6 +427,7 @@ function buildLivePrefill(job) {
       framerate: v.framerate, gop: v.gop, reference_frames: v.reference_frames,
       profile: v.profile, level: v.level,
       audio_codec: v.audio_codec, audio_bitrate: v.audio_bitrate, sample_rate: v.sample_rate,
+      av1_preset: v.av1_preset,
     })),
   }
 }

@@ -27,6 +27,7 @@ from subtitle_processor import (
     segment_vtt_for_hls,
 )
 import time_utils
+from av1_utils import is_av1, variants_use_av1, av1_video_args, av1_codecs_string
 
 # In-memory job registry
 _vod_jobs = {}
@@ -169,35 +170,50 @@ def _build_clip_command(input_url: str, clip_idx: int, start_sec: float, end_sec
         video_paths[name] = out_path
 
         cmd += ["-map", f"[v{i}out]", "-an"]
-        cmd += ["-c:v", codec]
         # keyint=gop, scenecut=0  -> keyframes ONLY at the forced GOP positions
         #   (no scene-cut IDRs) so copy-segmentation yields uniform segments.
         # repeat-headers=1        -> SPS/PPS before every IDR, so each TS segment
         #   is independently decodable (fixes "non-existing SPS 0").
         # open-gop=0              -> closed GOPs for clean HLS splits.
         gop_struct = f"keyint={gop_frames}:min-keyint=1:scenecut=0:open-gop=0:repeat-headers=1"
-        if codec == "libx264":
-            cmd += ["-x264-params",
-                    f"rc-lookahead=32:bframes=3:ref={ref}:nal-hrd=cbr:"
-                    f"bitrate={bitrate // 1000}:vbv-maxrate={bitrate // 1000}:vbv-bufsize={bitrate // 500}:"
-                    f"{gop_struct}",
-                    "-profile:v", profile, "-level:v", level]
-        elif codec == "libx265":
-            cmd += ["-x265-params",
-                    f"rc-lookahead=32:bframes=3:ref={ref}:"
-                    f"vbv-maxrate={bitrate // 1000}:vbv-bufsize={bitrate // 500}:"
-                    f"{gop_struct}",
-                    "-tag:v", "hvc1"]
-        cmd += [
-            "-b:v", str(bitrate),
-            "-r", fps_str,
-            "-preset", preset,
-            "-force_key_frames", force_kf,
-            "-pix_fmt", "yuv420p",
-            "-color_range", "tv",
-            "-avoid_negative_ts", "make_zero",
-            out_path,
-        ]
+        if is_av1(codec):
+            # AV1: no -profile/-level (encoder derives level); library-specific
+            # speed knob + keyint via av1_utils. -force_key_frames still applies
+            # at the ffmpeg layer so clip/GOP boundaries stay keyframe-aligned.
+            cmd += av1_video_args(codec, None, bitrate, gop_frames,
+                                  v.get("av1_preset"))
+            cmd += [
+                "-r", fps_str,
+                "-force_key_frames", force_kf,
+                "-pix_fmt", "yuv420p",
+                "-color_range", "tv",
+                "-avoid_negative_ts", "make_zero",
+                out_path,
+            ]
+        else:
+            cmd += ["-c:v", codec]
+            if codec == "libx264":
+                cmd += ["-x264-params",
+                        f"rc-lookahead=32:bframes=3:ref={ref}:nal-hrd=cbr:"
+                        f"bitrate={bitrate // 1000}:vbv-maxrate={bitrate // 1000}:vbv-bufsize={bitrate // 500}:"
+                        f"{gop_struct}",
+                        "-profile:v", profile, "-level:v", level]
+            elif codec == "libx265":
+                cmd += ["-x265-params",
+                        f"rc-lookahead=32:bframes=3:ref={ref}:"
+                        f"vbv-maxrate={bitrate // 1000}:vbv-bufsize={bitrate // 500}:"
+                        f"{gop_struct}",
+                        "-tag:v", "hvc1"]
+            cmd += [
+                "-b:v", str(bitrate),
+                "-r", fps_str,
+                "-preset", preset,
+                "-force_key_frames", force_kf,
+                "-pix_fmt", "yuv420p",
+                "-color_range", "tv",
+                "-avoid_negative_ts", "make_zero",
+                out_path,
+            ]
 
     # Single shared audio track.
     a = variants[0]
@@ -290,6 +306,36 @@ def _build_segment_command(merged_video: str, merged_audio: Optional[str], name:
     return cmd
 
 
+def _build_fmp4_segment_command(merged_video: str, merged_audio: Optional[str], name: str,
+                                output_dir: str, seg_dur: float, ffmpeg_path: str) -> list:
+    """Segment a merged AV1 variant into fragmented-MP4 (CMAF) parts via the HLS
+    muxer. AV1 cannot be carried in MPEG-TS, so HLS AV1 requires fMP4 (an
+    init.mp4 + .m4s media segments referenced by EXT-X-MAP).
+
+    The merged file already has keyframes forced on the GOP grid, so -hls_time
+    == seg_dur makes the muxer split uniformly at those keyframes. We -c copy
+    (no re-encode); the HLS muxer writes the init segment, EXT-X-MAP and EXTINF
+    for us, so this playlist is NOT run through _normalize_variant_playlist."""
+    cmd = [ffmpeg_path, "-y", "-hide_banner", "-i", merged_video]
+    if merged_audio and os.path.exists(merged_audio):
+        cmd += ["-i", merged_audio, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy"]
+    else:
+        cmd += ["-map", "0:v:0", "-c", "copy", "-an"]
+    cmd += [
+        "-f", "hls",
+        "-hls_time", f"{seg_dur:.3f}",
+        "-hls_playlist_type", "vod",
+        "-hls_list_size", "0",
+        "-hls_segment_type", "fmp4",
+        "-hls_fmp4_init_filename", f"init_{name}.mp4",
+        "-hls_segment_filename", os.path.join(output_dir, f"segment_{name}_%05d.m4s"),
+        "-hls_flags", "independent_segments",
+        "-start_number", "1",
+        os.path.join(output_dir, f"variant_{name}.m3u8"),
+    ]
+    return cmd
+
+
 def _normalize_variant_playlist(playlist_path: str) -> Optional[list]:
     """Rewrite a segment-muxer playlist with proper HLS headers (VERSION:6,
     TARGETDURATION, MEDIA-SEQUENCE:1, PLAYLIST-TYPE:VOD, INDEPENDENT-SEGMENTS)
@@ -360,6 +406,8 @@ def _h264_profile_idc(profile_name: str) -> str:
 
 def _codecs_string(variant: dict) -> str:
     codec = variant.get("video_codec", "libx264")
+    if is_av1(codec):
+        return av1_codecs_string(variant.get("height", 0))
     if codec == "libx265":
         return "hvc1.1.6.L93.B0,mp4a.40.2"
     profile_idc = _h264_profile_idc(variant.get("profile", "main"))
@@ -698,6 +746,7 @@ def _run_hls_pipeline(pinfo, job_config, input_url, variants, clips_sec, fps, go
     segment_times, _total = _compute_segment_times(
         clips_sec, fps, gop_frames, use_open_ended, total_output_duration)
     logging.info(f"[VOD:{name}] {len(segment_times)} segment-cut times computed")
+    gop_dur = gop_frames / float(fps)
     n = len(variants)
     for vi, v in enumerate(variants):
         if pinfo.get("cancel"):
@@ -705,15 +754,26 @@ def _run_hls_pipeline(pinfo, job_config, input_url, variants, clips_sec, fps, go
         vname = f"{v.get('height', 0)}p"
         if vname not in merged_video:
             continue
-        cmd = _build_segment_command(merged_video[vname], merged_audio, vname,
-                                     output_dir, segment_times, ffmpeg_path)
         base = 66 + int(vi / n * 20)
-        rc = _run_ffmpeg(cmd, log_path, pinfo, base, max(1, int(20 / n)), 0)
-        if rc == -1:
-            return
-        if rc != 0:
-            raise RuntimeError(f"Segmentation failed for {vname} (rc={rc})")
-        _normalize_variant_playlist(os.path.join(output_dir, f"variant_{vname}.m3u8"))
+        if is_av1(v.get("video_codec", "")):
+            # AV1 -> fragmented-MP4 (CMAF) segments; the HLS muxer writes the
+            # playlist with EXT-X-MAP, so do NOT normalize it afterwards.
+            cmd = _build_fmp4_segment_command(merged_video[vname], merged_audio, vname,
+                                              output_dir, gop_dur, ffmpeg_path)
+            rc = _run_ffmpeg(cmd, log_path, pinfo, base, max(1, int(20 / n)), 0)
+            if rc == -1:
+                return
+            if rc != 0:
+                raise RuntimeError(f"AV1 fMP4 segmentation failed for {vname} (rc={rc})")
+        else:
+            cmd = _build_segment_command(merged_video[vname], merged_audio, vname,
+                                         output_dir, segment_times, ffmpeg_path)
+            rc = _run_ffmpeg(cmd, log_path, pinfo, base, max(1, int(20 / n)), 0)
+            if rc == -1:
+                return
+            if rc != 0:
+                raise RuntimeError(f"Segmentation failed for {vname} (rc={rc})")
+            _normalize_variant_playlist(os.path.join(output_dir, f"variant_{vname}.m3u8"))
 
     # 4) Reference video segments come from the top (first) variant playlist.
     pinfo["progress_pct"] = 88
@@ -724,8 +784,11 @@ def _run_hls_pipeline(pinfo, job_config, input_url, variants, clips_sec, fps, go
         _, video_segments, _ = parse_variant_segments(top_playlist)
 
     # MPEGTS base (first video packet PTS) for the subtitle X-TIMESTAMP-MAP.
-    mpegts_base = 126000
-    if video_segments:
+    # fMP4/AV1 media timelines start at 0, so the base is 0 there; TS segments
+    # carry ffmpeg's ~1.4s initial PTS which we read from the first segment.
+    top_is_av1 = is_av1(variants[0].get("video_codec", ""))
+    mpegts_base = 0 if top_is_av1 else 126000
+    if video_segments and not top_is_av1:
         first_ts = os.path.join(output_dir, video_segments[0][2])
         if os.path.exists(first_ts):
             mpegts_base = _get_first_pts_90k("ffprobe", first_ts)
@@ -770,15 +833,19 @@ def _run_mp4_pipeline(pinfo, input_url, variants, clips_sec, fps, preset,
     v = variants[0]
     cs, ce = clips_sec[0]
     out_file = os.path.join(output_dir, f"{master_filename}.mp4")
+    codec = v.get("video_codec", "libx264")
+    bitrate = int(v.get("video_bitrate", 4000000))
+    gop_frames = max(1, int(round(2 * float(fps))))  # 2s GOP for progressive MP4
     cmd = [ffmpeg_path, "-y", "-hide_banner"]
     cmd += ["-ss", f"{cs:.3f}"]
     if not use_open_ended:
         cmd += ["-t", f"{max(0.0, ce - cs):.3f}"]
-    cmd += ["-i", input_url,
-            "-c:v", v.get("video_codec", "libx264"),
-            "-b:v", str(v.get("video_bitrate", 4000000)),
-            "-r", f"{fps.numerator}/{fps.denominator}",
-            "-preset", preset, "-pix_fmt", "yuv420p",
+    cmd += ["-i", input_url]
+    if is_av1(codec):
+        cmd += av1_video_args(codec, None, bitrate, gop_frames, v.get("av1_preset"))
+    else:
+        cmd += ["-c:v", codec, "-b:v", str(bitrate), "-preset", preset]
+    cmd += ["-r", f"{fps.numerator}/{fps.denominator}", "-pix_fmt", "yuv420p",
             "-c:a", v.get("audio_codec", "aac"),
             "-b:a", str(v.get("audio_bitrate", 128000)),
             "-ar", str(v.get("sample_rate", 48000)),
