@@ -10,8 +10,8 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
 import SaveIcon from '@mui/icons-material/Save'
 import CancelIcon from '@mui/icons-material/Cancel'
-import { getTemplates } from '../../api/transcoder'
-import { AV1_LIBRARIES, isAv1, av1Meta, clampAv1Preset } from '../shared/av1'
+import { getTemplates, getAv1Encoders } from '../../api/transcoder'
+import { isAv1, av1Meta, clampAv1Preset, availableAv1Libraries, pickAv1Default } from '../shared/av1'
 
 const VIDEO_CODECS = [
   { value: 'libx264', label: 'H.264 (AVC)' },
@@ -72,12 +72,20 @@ export default function VideoAudioConfig({ value: variants = [], onChange }) {
   const [editIdx, setEditIdx] = useState(-1)
   const [addForm, setAddForm] = useState(null)
   const [error, setError] = useState('')
+  const [av1Info, setAv1Info] = useState(null)  // { all, available, default }
 
   useEffect(() => {
     getTemplates()
       .then((data) => setTemplates(data || {}))
       .catch(() => {})
+    getAv1Encoders()
+      .then((data) => setAv1Info(data))
+      .catch(() => {})
   }, [])
+
+  const av1Available = av1Info?.available ?? null       // null = unknown → allow all
+  const av1Libs = availableAv1Libraries(av1Available)
+  const av1Disabled = Array.isArray(av1Available) && av1Available.length === 0
 
   const applyTemplate = (key) => {
     if (!key || !templates[key]) return
@@ -146,11 +154,15 @@ export default function VideoAudioConfig({ value: variants = [], onChange }) {
               label="Video Codec"
               onChange={(e) => {
                 const val = e.target.value
-                if (val === 'av1') setForm({ ...form, video_codec: 'libsvtav1', av1_preset: av1Meta('libsvtav1').default })
+                if (val === 'av1') { const d = pickAv1Default(av1Info) || 'libsvtav1'; setForm({ ...form, video_codec: d, av1_preset: av1Meta(d).default }) }
                 else { const { av1_preset, ...rest } = form; setForm({ ...rest, video_codec: val }) }
               }}
             >
-              {VIDEO_CODECS.map((c) => <MenuItem key={c.value} value={c.value}>{c.label}</MenuItem>)}
+              {VIDEO_CODECS.map((c) => (
+                <MenuItem key={c.value} value={c.value} disabled={c.value === 'av1' && av1Disabled}>
+                  {c.label}{c.value === 'av1' && av1Disabled ? ' — not available on server' : ''}
+                </MenuItem>
+              ))}
             </Select>
           </FormControl>
         </Grid>
@@ -167,7 +179,11 @@ export default function VideoAudioConfig({ value: variants = [], onChange }) {
                     setForm({ ...form, video_codec: lib, av1_preset: clampAv1Preset(lib, form.av1_preset ?? av1Meta(lib).default) })
                   }}
                 >
-                  {AV1_LIBRARIES.map((l) => <MenuItem key={l.value} value={l.value}>{l.label}</MenuItem>)}
+                  {av1Libs.map((l) => <MenuItem key={l.value} value={l.value}>{l.label}</MenuItem>)}
+                  {/* keep a cloned-but-unavailable value selectable so the warning shows */}
+                  {av1Available && !av1Available.includes(form.video_codec) && (
+                    <MenuItem value={form.video_codec}>{av1Meta(form.video_codec).label} (unavailable)</MenuItem>
+                  )}
                 </Select>
               </FormControl>
             </Grid>
@@ -186,9 +202,16 @@ export default function VideoAudioConfig({ value: variants = [], onChange }) {
               </FormControl>
             </Grid>
             <Grid item xs={12}>
-              <Alert severity="info" sx={{ py: 0.5, '& .MuiAlert-message': { fontSize: 12 } }}>
-                {av1Meta(form.video_codec).hint}
-              </Alert>
+              {av1Available && !av1Available.includes(form.video_codec) ? (
+                <Alert severity="warning" sx={{ py: 0.5, '& .MuiAlert-message': { fontSize: 12 } }}>
+                  {av1Meta(form.video_codec).label} is not available in this server's FFmpeg build
+                  {av1Available.length ? ` (available: ${av1Available.join(', ')})` : ''}. Pick an available library or the job will be rejected.
+                </Alert>
+              ) : (
+                <Alert severity="info" sx={{ py: 0.5, '& .MuiAlert-message': { fontSize: 12 } }}>
+                  {av1Meta(form.video_codec).hint}
+                </Alert>
+              )}
             </Grid>
           </>
         )}

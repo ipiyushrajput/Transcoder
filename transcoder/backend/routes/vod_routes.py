@@ -5,6 +5,7 @@ from flask import Blueprint, request, jsonify
 from database import get_db, close_db, Job, JobVariant, JobClip
 from input_validator import validate_input_url, parse_probe_info
 from vod_transcoder import start_vod_job, stop_vod_job, get_vod_job_status
+from av1_utils import validate_av1_variants
 
 vod_bp = Blueprint("vod", __name__, url_prefix="/api/vod")
 
@@ -141,6 +142,12 @@ def start_job():
             return jsonify({"error": f"Variant {i+1}: width and height are required"}), 400
         if not v.get("video_bitrate"):
             return jsonify({"error": f"Variant {i+1}: video_bitrate is required"}), 400
+
+    # Reject AV1 encoders this FFmpeg build lacks (avoids a mid-encode
+    # "Option not found" failure on -svtav1-params/-aom-params/etc.).
+    av1_error = validate_av1_variants(variants)
+    if av1_error:
+        return jsonify({"error": av1_error}), 400
 
     job_id = str(uuid.uuid4())
 

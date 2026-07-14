@@ -18,6 +18,7 @@ api.interceptors.response.use(
 
 // --- Common ---
 export const getTemplates = () => api.get('/api/templates').then((r) => r.data)
+export const getAv1Encoders = () => api.get('/api/av1-encoders').then((r) => r.data)
 export const probeInput = (url) => api.post('/api/probe', { url }).then((r) => r.data)
 export const getSystemStatus = () => api.get('/api/status').then((r) => r.data)
 export const listJobs = (params = {}) => api.get('/api/jobs', { params }).then((r) => r.data)

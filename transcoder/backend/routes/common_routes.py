@@ -4,6 +4,7 @@ from database import get_db, close_db, Job, JobVariant, JobClip
 from input_validator import validate_input_url, run_ffprobe, parse_probe_info
 from vod_transcoder import list_active_vod_jobs, get_vod_job_status, get_vod_job_logs
 from live_transcoder import list_active_live_channels, get_live_channel_status, get_live_channel_logs
+from av1_utils import available_av1_encoders, default_av1_encoder, AV1_ENCODERS, is_av1
 
 common_bp = Blueprint("common", __name__, url_prefix="/api")
 
@@ -111,7 +112,43 @@ TEMPLATES = {
 
 @common_bp.route("/templates", methods=["GET"])
 def get_templates():
-    return jsonify(TEMPLATES), 200
+    """Serve quick templates. AV1 templates are remapped to an AV1 encoder this
+    server actually has (or dropped entirely if none is available), so applying
+    a template never yields a codec the FFmpeg build can't run."""
+    avail = available_av1_encoders()
+    if avail is None:
+        # Detection unavailable — serve templates as-is.
+        return jsonify(TEMPLATES), 200
+
+    out = {}
+    for key, tmpl in TEMPLATES.items():
+        has_av1 = any(is_av1(v.get("video_codec", "")) for v in tmpl["variants"])
+        if not has_av1:
+            out[key] = tmpl
+            continue
+        if not avail:
+            continue  # no AV1 encoder on this build -> drop AV1 template
+        enc = default_av1_encoder()
+        remapped = dict(tmpl)
+        remapped["variants"] = [
+            {**v, "video_codec": enc} if is_av1(v.get("video_codec", "")) else v
+            for v in tmpl["variants"]
+        ]
+        out[key] = remapped
+    return jsonify(out), 200
+
+
+@common_bp.route("/av1-encoders", methods=["GET"])
+def get_av1_encoders():
+    """Report which AV1 encoders this server's FFmpeg supports, so the UI only
+    offers libraries that will actually work. `available` is null when detection
+    could not be run (FFmpeg not found), in which case the UI offers all three."""
+    avail = available_av1_encoders()
+    return jsonify({
+        "all": sorted(AV1_ENCODERS),
+        "available": None if avail is None else sorted(avail),
+        "default": default_av1_encoder(),
+    }), 200
 
 
 @common_bp.route("/probe", methods=["POST"])

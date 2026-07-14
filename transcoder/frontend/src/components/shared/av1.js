@@ -39,3 +39,16 @@ export const clampAv1Preset = (codec, preset) => {
   const p = Number.isFinite(+preset) ? +preset : meta.default
   return Math.max(0, Math.min(meta.max, p))
 }
+
+// Filter the library list to those the server's FFmpeg supports.
+// `available` is null when detection couldn't run → offer all three.
+export const availableAv1Libraries = (available) =>
+  available == null ? AV1_LIBRARIES : AV1_LIBRARIES.filter((l) => available.includes(l.value))
+
+// First available AV1 encoder (respecting the server-suggested default), used
+// when the user picks "AV1" or clones a config whose encoder is missing.
+export const pickAv1Default = (av1Info) => {
+  if (!av1Info || av1Info.available == null) return 'libsvtav1'
+  if (av1Info.default && av1Info.available.includes(av1Info.default)) return av1Info.default
+  return av1Info.available[0] || null
+}
