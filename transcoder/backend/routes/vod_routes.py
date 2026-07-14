@@ -59,6 +59,7 @@ def _save_job_to_db(job_config: dict, job_id: str, playback_url: str):
                 audio_codec=v.get("audio_codec", "aac"),
                 audio_bitrate=v.get("audio_bitrate"),
                 sample_rate=v.get("sample_rate"),
+                av1_preset=v.get("av1_preset"),
             )
             db.add(variant)
 

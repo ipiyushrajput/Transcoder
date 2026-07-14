@@ -10,6 +10,7 @@ from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 from s3_uploader import build_s3_client, start_live_upload_watcher
+from av1_utils import is_av1, variants_use_av1, av1_video_args
 
 _live_channels = {}
 _live_locks = {}
@@ -82,34 +83,43 @@ def build_live_hls_command(
         sample_rate = v.get("sample_rate", 48000)
 
         cmd.extend(["-map", f"[v{i}out]", "-map", f"[a{i}out]"])
-        cmd.extend([f"-c:v:{i}", codec])
 
-        if codec == "libx264":
-            x264_params = (
-                f"rc-lookahead=16:bframes=2:ref={ref}:nal-hrd=cbr:"
-                f"bitrate={bitrate // 1000}:vbv-maxrate={bitrate // 1000}:"
-                f"vbv-bufsize={bitrate // 500}"
-            )
+        if is_av1(codec):
+            # AV1: library-specific encoder args (low-latency tuning for live);
+            # no -profile/-level (encoder derives level). -preset here is the
+            # numeric AV1 speed knob, set inside av1_video_args.
+            cmd.extend(av1_video_args(codec, i, bitrate, gop,
+                                      v.get("av1_preset"), low_latency=True))
+        else:
+            cmd.extend([f"-c:v:{i}", codec])
+            if codec == "libx264":
+                x264_params = (
+                    f"rc-lookahead=16:bframes=2:ref={ref}:nal-hrd=cbr:"
+                    f"bitrate={bitrate // 1000}:vbv-maxrate={bitrate // 1000}:"
+                    f"vbv-bufsize={bitrate // 500}"
+                )
+                cmd.extend([
+                    f"-x264-params:v:{i}", x264_params,
+                    f"-profile:v:{i}", profile,
+                    f"-level:v:{i}", level,
+                ])
+            elif codec == "libx265":
+                x265_params = (
+                    f"rc-lookahead=16:bframes=2:ref={ref}:"
+                    f"vbv-maxrate={bitrate // 1000}:vbv-bufsize={bitrate // 500}"
+                )
+                cmd.extend([
+                    f"-x265-params:v:{i}", x265_params,
+                    f"-tag:v:{i}", "hvc1",
+                ])
             cmd.extend([
-                f"-x264-params:v:{i}", x264_params,
-                f"-profile:v:{i}", profile,
-                f"-level:v:{i}", level,
-            ])
-        elif codec == "libx265":
-            x265_params = (
-                f"rc-lookahead=16:bframes=2:ref={ref}:"
-                f"vbv-maxrate={bitrate // 1000}:vbv-bufsize={bitrate // 500}"
-            )
-            cmd.extend([
-                f"-x265-params:v:{i}", x265_params,
-                f"-tag:v:{i}", "hvc1",
+                f"-b:v:{i}", str(bitrate),
+                f"-g:v:{i}", str(gop),
+                f"-preset:v:{i}", preset,
             ])
 
         cmd.extend([
-            f"-b:v:{i}", str(bitrate),
             f"-r:v:{i}", str(framerate),
-            f"-g:v:{i}", str(gop),
-            f"-preset:v:{i}", preset,
             f"-pix_fmt:v:{i}", "yuv420p",
             f"-c:a:{i}", audio_codec,
             f"-b:a:{i}", str(audio_bitrate),
@@ -122,7 +132,6 @@ def build_live_hls_command(
     )
     cmd.extend(["-var_stream_map", stream_map])
 
-    segment_filename = os.path.join(output_dir, "seg_%v_%05d.ts")
     variant_playlist = os.path.join(output_dir, "live_%v.m3u8")
 
     cmd.extend([
@@ -130,13 +139,26 @@ def build_live_hls_command(
         "-start_number", "1",
         "-hls_time", str(segment_size),
         "-hls_list_size", str(hls_list_size),
-        "-hls_segment_filename", segment_filename,
         "-master_pl_name", f"{master_filename}.m3u8",
         "-hls_flags", hls_flags,
-        "-hls_segment_type", "mpegts",
-        variant_playlist,
     ])
 
+    # AV1 cannot be carried in MPEG-TS: switch the whole output to fragmented
+    # MP4 (CMAF) when any variant is AV1. fMP4 is valid for AVC/HEVC too, so a
+    # mixed ladder stays consistent.
+    if variants_use_av1(variants):
+        cmd.extend([
+            "-hls_segment_type", "fmp4",
+            "-hls_fmp4_init_filename", "init_%v.mp4",
+            "-hls_segment_filename", os.path.join(output_dir, "seg_%v_%05d.m4s"),
+        ])
+    else:
+        cmd.extend([
+            "-hls_segment_type", "mpegts",
+            "-hls_segment_filename", os.path.join(output_dir, "seg_%v_%05d.ts"),
+        ])
+
+    cmd.append(variant_playlist)
     return cmd
 
 

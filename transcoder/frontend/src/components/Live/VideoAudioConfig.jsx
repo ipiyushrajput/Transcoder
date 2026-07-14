@@ -11,10 +11,12 @@ import EditIcon from '@mui/icons-material/Edit'
 import SaveIcon from '@mui/icons-material/Save'
 import CancelIcon from '@mui/icons-material/Cancel'
 import { getTemplates } from '../../api/transcoder'
+import { AV1_LIBRARIES, isAv1, av1Meta, clampAv1Preset } from '../shared/av1'
 
 const VIDEO_CODECS = [
   { value: 'libx264', label: 'H.264 (AVC)' },
   { value: 'libx265', label: 'H.265 (HEVC)' },
+  { value: 'av1', label: 'AV1 (royalty-free)' },
 ]
 const AUDIO_CODECS = [
   { value: 'aac', label: 'AAC' },
@@ -84,11 +86,57 @@ export default function LiveVideoAudioConfig({ value: variants = [], onChange })
         <Grid item xs={6} md={3}>
           <FormControl fullWidth size="small">
             <InputLabel>Video Codec</InputLabel>
-            <Select value={form.video_codec || 'libx264'} label="Video Codec" onChange={(e) => setForm({ ...form, video_codec: e.target.value })}>
+            <Select
+              value={isAv1(form.video_codec) ? 'av1' : (form.video_codec || 'libx264')}
+              label="Video Codec"
+              onChange={(e) => {
+                const val = e.target.value
+                if (val === 'av1') setForm({ ...form, video_codec: 'libsvtav1', av1_preset: av1Meta('libsvtav1').default })
+                else { const { av1_preset, ...rest } = form; setForm({ ...rest, video_codec: val }) }
+              }}
+            >
               {VIDEO_CODECS.map((c) => <MenuItem key={c.value} value={c.value}>{c.label}</MenuItem>)}
             </Select>
           </FormControl>
         </Grid>
+        {isAv1(form.video_codec) && (
+          <>
+            <Grid item xs={6} md={3}>
+              <FormControl fullWidth size="small">
+                <InputLabel>AV1 Library</InputLabel>
+                <Select
+                  value={form.video_codec}
+                  label="AV1 Library"
+                  onChange={(e) => {
+                    const lib = e.target.value
+                    setForm({ ...form, video_codec: lib, av1_preset: clampAv1Preset(lib, form.av1_preset ?? av1Meta(lib).default) })
+                  }}
+                >
+                  {AV1_LIBRARIES.map((l) => <MenuItem key={l.value} value={l.value}>{l.label}</MenuItem>)}
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={6} md={3}>
+              <FormControl fullWidth size="small">
+                <InputLabel>AV1 Preset (speed)</InputLabel>
+                <Select
+                  value={form.av1_preset ?? av1Meta(form.video_codec).default}
+                  label="AV1 Preset (speed)"
+                  onChange={(e) => setForm({ ...form, av1_preset: e.target.value })}
+                >
+                  {Array.from({ length: av1Meta(form.video_codec).max + 1 }, (_, n) => (
+                    <MenuItem key={n} value={n}>{n}{n === 0 ? ' (slowest / best)' : n === av1Meta(form.video_codec).max ? ' (fastest)' : ''}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12}>
+              <Alert severity="info" sx={{ py: 0.5, '& .MuiAlert-message': { fontSize: 12 } }}>
+                {av1Meta(form.video_codec).hint} For live, higher presets keep latency low.
+              </Alert>
+            </Grid>
+          </>
+        )}
         <Grid item xs={6} md={3}>
           <TextField fullWidth size="small" type="number" label="Video Bitrate (bps)" value={form.video_bitrate || ''} onChange={(e) => setForm({ ...form, video_bitrate: parseInt(e.target.value) || 0 })} helperText={form.video_bitrate ? formatBitrate(form.video_bitrate) : ''} />
         </Grid>

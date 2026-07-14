@@ -84,6 +84,7 @@ class JobVariant(Base):
     audio_bitrate = Column(Integer)
     sample_rate = Column(Integer)
     bandwidth = Column(Integer)
+    av1_preset = Column(Integer)  # AV1 speed knob (svtav1 0-13 / aom 0-8 / rav1e 0-10)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -117,12 +118,34 @@ def init_db():
 
         engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True, pool_recycle=3600)
         Base.metadata.create_all(engine)
+        _run_light_migrations(engine)
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         logging.info(f"Database initialized: {DB_NAME}")
         return True
     except Exception as e:
         logging.error(f"Database initialization failed: {e}")
         return False
+
+
+def _run_light_migrations(engine):
+    """Add columns introduced after a table was first created. create_all()
+    never ALTERs existing tables, so new columns (e.g. av1_preset) need this."""
+    migrations = [
+        ("job_variants", "av1_preset", "ALTER TABLE job_variants ADD COLUMN av1_preset INT"),
+    ]
+    with engine.connect() as conn:
+        for table, column, ddl in migrations:
+            try:
+                exists = conn.execute(text(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE table_schema = :db AND table_name = :t AND column_name = :c"
+                ), {"db": DB_NAME, "t": table, "c": column}).scalar()
+                if not exists:
+                    conn.execute(text(ddl))
+                    conn.commit()
+                    logging.info(f"Migration: added {table}.{column}")
+            except Exception as e:
+                logging.warning(f"Migration for {table}.{column} skipped: {e}")
 
 
 def get_db():
