@@ -85,6 +85,7 @@ class JobVariant(Base):
     sample_rate = Column(Integer)
     bandwidth = Column(Integer)
     av1_preset = Column(Integer)  # AV1 speed knob (svtav1 0-13 / aom 0-8 / rav1e 0-10)
+    av1_segment_ext = Column(String(8))  # AV1 fMP4 media segment extension: m4s | mp4
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -132,6 +133,7 @@ def _run_light_migrations(engine):
     never ALTERs existing tables, so new columns (e.g. av1_preset) need this."""
     migrations = [
         ("job_variants", "av1_preset", "ALTER TABLE job_variants ADD COLUMN av1_preset INT"),
+        ("job_variants", "av1_segment_ext", "ALTER TABLE job_variants ADD COLUMN av1_segment_ext VARCHAR(8)"),
     ]
     with engine.connect() as conn:
         for table, column, ddl in migrations:

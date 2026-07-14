@@ -368,6 +368,7 @@ def _serialize_variant(v: JobVariant) -> dict:
         "audio_bitrate": v.audio_bitrate,
         "sample_rate": v.sample_rate,
         "av1_preset": v.av1_preset,
+        "av1_segment_ext": v.av1_segment_ext,
     }
 
 

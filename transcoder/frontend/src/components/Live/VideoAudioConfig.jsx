@@ -97,7 +97,7 @@ export default function LiveVideoAudioConfig({ value: variants = [], onChange })
               label="Video Codec"
               onChange={(e) => {
                 const val = e.target.value
-                if (val === 'av1') { const d = pickAv1Default(av1Info) || 'libsvtav1'; setForm({ ...form, video_codec: d, av1_preset: av1Meta(d).default }) }
+                if (val === 'av1') { const d = pickAv1Default(av1Info) || 'libsvtav1'; setForm({ ...form, video_codec: d, av1_preset: av1Meta(d).default, av1_segment_ext: form.av1_segment_ext ?? 'm4s' }) }
                 else { const { av1_preset, ...rest } = form; setForm({ ...rest, video_codec: val }) }
               }}
             >
@@ -140,6 +140,19 @@ export default function LiveVideoAudioConfig({ value: variants = [], onChange })
                   {Array.from({ length: av1Meta(form.video_codec).max + 1 }, (_, n) => (
                     <MenuItem key={n} value={n}>{n}{n === 0 ? ' (slowest / best)' : n === av1Meta(form.video_codec).max ? ' (fastest)' : ''}</MenuItem>
                   ))}
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={6} md={3}>
+              <FormControl fullWidth size="small">
+                <InputLabel>AV1 Segment Container</InputLabel>
+                <Select
+                  value={form.av1_segment_ext || 'm4s'}
+                  label="AV1 Segment Container"
+                  onChange={(e) => setForm({ ...form, av1_segment_ext: e.target.value })}
+                >
+                  <MenuItem value="m4s">.m4s (fMP4 / CMAF)</MenuItem>
+                  <MenuItem value="mp4">.mp4 (fMP4)</MenuItem>
                 </Select>
               </FormControl>
             </Grid>

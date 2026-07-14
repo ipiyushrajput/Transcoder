@@ -307,15 +307,25 @@ def _build_segment_command(merged_video: str, merged_audio: Optional[str], name:
 
 
 def _build_fmp4_segment_command(merged_video: str, merged_audio: Optional[str], name: str,
-                                output_dir: str, seg_dur: float, ffmpeg_path: str) -> list:
+                                seg_dur: float, ffmpeg_path: str, seg_ext: str = "m4s") -> list:
     """Segment a merged AV1 variant into fragmented-MP4 (CMAF) parts via the HLS
     muxer. AV1 cannot be carried in MPEG-TS, so HLS AV1 requires fMP4 (an
-    init.mp4 + .m4s media segments referenced by EXT-X-MAP).
+    init.mp4 + media segments referenced by EXT-X-MAP).
 
-    The merged file already has keyframes forced on the GOP grid, so -hls_time
-    == seg_dur makes the muxer split uniformly at those keyframes. We -c copy
-    (no re-encode); the HLS muxer writes the init segment, EXT-X-MAP and EXTINF
-    for us, so this playlist is NOT run through _normalize_variant_playlist."""
+    IMPORTANT: all OUTPUT names here are bare (no directory) and the caller runs
+    ffmpeg with cwd=output_dir. FFmpeg's HLS muxer derives the init-segment
+    directory by splitting the playlist path on '/' only, so a Windows path
+    (C:\\...\\out\\variant.m3u8) leaves the init written to the process CWD, not
+    the output dir (segments present, init missing -> 404). Bare names + cwd
+    avoid that path-separator parsing entirely and work on every OS. The merged
+    input stays an absolute path (reading is separator-agnostic).
+
+    seg_ext selects the media-segment extension ('m4s' or 'mp4'); the init is
+    always .mp4. The merged file already has keyframes forced on the GOP grid,
+    so -hls_time == seg_dur splits uniformly. We -c copy (no re-encode); the HLS
+    muxer writes the init, EXT-X-MAP and EXTINF, so the playlist is NOT run
+    through _normalize_variant_playlist."""
+    ext = "mp4" if str(seg_ext).lstrip(".").lower() == "mp4" else "m4s"
     cmd = [ffmpeg_path, "-y", "-hide_banner", "-i", merged_video]
     if merged_audio and os.path.exists(merged_audio):
         cmd += ["-i", merged_audio, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy"]
@@ -328,10 +338,10 @@ def _build_fmp4_segment_command(merged_video: str, merged_audio: Optional[str], 
         "-hls_list_size", "0",
         "-hls_segment_type", "fmp4",
         "-hls_fmp4_init_filename", f"init_{name}.mp4",
-        "-hls_segment_filename", os.path.join(output_dir, f"segment_{name}_%05d.m4s"),
+        "-hls_segment_filename", f"segment_{name}_%05d.{ext}",
         "-hls_flags", "independent_segments",
         "-start_number", "1",
-        os.path.join(output_dir, f"variant_{name}.m3u8"),
+        f"variant_{name}.m3u8",
     ]
     return cmd
 
@@ -450,14 +460,18 @@ def _write_master_playlist(master_path: str, variants: list, sub_lang: Optional[
 # Subprocess runner with cancel + progress
 # ----------------------------------------------------------------------------
 def _run_ffmpeg(cmd: list, log_path: str, pinfo: dict, base_pct: int, span_pct: int,
-                expected_seconds: float) -> int:
+                expected_seconds: float, cwd: Optional[str] = None) -> int:
     """Run an ffmpeg command, streaming to the persistent log, supporting cancel
     via pinfo['cancel'] and updating pinfo['progress_pct'] from the time= output.
+    `cwd` sets the process working directory (used for fMP4 output so relative
+    filenames resolve into the output dir regardless of path separators).
     Returns the process return code (or -1 if cancelled)."""
     with open(log_path, "a", errors="replace") as log_f:
         log_f.write(f"\n$ {' '.join(cmd)}\n")
+        if cwd:
+            log_f.write(f"(cwd={cwd})\n")
         log_f.flush()
-        proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT, cwd=cwd)
         pinfo["current_proc"] = proc
 
         while proc.poll() is None:
@@ -758,9 +772,13 @@ def _run_hls_pipeline(pinfo, job_config, input_url, variants, clips_sec, fps, go
         if is_av1(v.get("video_codec", "")):
             # AV1 -> fragmented-MP4 (CMAF) segments; the HLS muxer writes the
             # playlist with EXT-X-MAP, so do NOT normalize it afterwards.
+            # Run with cwd=output_dir + bare names so the init segment always
+            # lands in output_dir (see _build_fmp4_segment_command).
+            seg_ext = v.get("av1_segment_ext", "m4s")
             cmd = _build_fmp4_segment_command(merged_video[vname], merged_audio, vname,
-                                              output_dir, gop_dur, ffmpeg_path)
-            rc = _run_ffmpeg(cmd, log_path, pinfo, base, max(1, int(20 / n)), 0)
+                                              gop_dur, ffmpeg_path, seg_ext=seg_ext)
+            rc = _run_ffmpeg(cmd, log_path, pinfo, base, max(1, int(20 / n)), 0,
+                             cwd=output_dir)
             if rc == -1:
                 return
             if rc != 0:
